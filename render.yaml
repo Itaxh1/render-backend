@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: rexy-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: REXY_WEB_ORIGIN
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+  - type: worker
+    name: rexy-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: python -m backend.worker
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: XAI_MODEL
+        value: grok-4.3

@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from datetime import date
+from typing import AsyncIterator
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .auth import SupabaseJWTVerifier, TokenVerifier, bearer_token
+from .config import Settings
+from .models import (
+    ClaimResponse,
+    DevicePrincipal,
+    DeviceStatus,
+    DashboardPayload,
+    ExchangeClaimRequest,
+    ExchangeClaimResponse,
+    IngestBatch,
+    IngestReceipt,
+    PublicConfig,
+    SummaryRequestResponse,
+)
+from .store import BatchConflictError, InvalidClaimError, Store
+
+
+def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None = None) -> FastAPI:
+    browser_verifier = verifier or SupabaseJWTVerifier(settings.supabase_url)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await store.open()
+        try:
+            yield
+        finally:
+            await store.close()
+
+    app = FastAPI(title="Rexy API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.rexy_web_origin],
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["authorization", "content-type"],
+    )
+
+    @app.middleware("http")
+    async def reject_oversized_ingest(request: Request, call_next):
+        if request.url.path == "/v1/ingest/batches":
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    too_large = int(content_length) > 4 * 1024 * 1024
+                except ValueError:
+                    return JSONResponse(
+                        status_code=400, content={"detail": "invalid content length"}
+                    )
+                if too_large:
+                    return JSONResponse(
+                        status_code=413, content={"detail": "request too large"}
+                    )
+        return await call_next(request)
+
+    async def browser_user(request: Request):
+        return await browser_verifier.verify(bearer_token(request))
+
+    async def device(request: Request) -> DevicePrincipal:
+        principal = await store.authenticate_device(bearer_token(request))
+        if principal is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid device token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return principal
+
+    @app.get("/healthz")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readiness() -> dict[str, str]:
+        if not await store.ready():
+            raise HTTPException(status_code=503, detail="database unavailable")
+        return {"status": "ready"}
+
+    @app.get("/v1/public/config", response_model=PublicConfig)
+    async def public_config() -> PublicConfig:
+        if not settings.supabase_publishable_key:
+            raise HTTPException(status_code=503, detail="browser authentication is not configured")
+        return PublicConfig(
+            supabase_url=settings.supabase_url,
+            supabase_publishable_key=settings.supabase_publishable_key,
+        )
+
+    @app.post("/v1/install/claims", response_model=ClaimResponse, status_code=201)
+    async def create_claim(user_id=Depends(browser_user)) -> ClaimResponse:
+        token, expires_at = await store.create_claim(user_id)
+        return ClaimResponse(claim_token=token, expires_at=expires_at)
+
+    @app.post(
+        "/v1/devices/exchange-claim",
+        response_model=ExchangeClaimResponse,
+        status_code=201,
+    )
+    async def exchange_claim(request: ExchangeClaimRequest) -> ExchangeClaimResponse:
+        try:
+            device_id, token = await store.exchange_claim(
+                request.claim_token, request.device_name, request.platform
+            )
+        except InvalidClaimError as error:
+            raise HTTPException(status_code=400, detail="invalid or expired claim") from error
+        return ExchangeClaimResponse(device_id=device_id, device_token=token)
+
+    @app.post("/v1/ingest/batches", response_model=IngestReceipt)
+    async def ingest_batch(
+        batch: IngestBatch,
+        principal: DevicePrincipal = Depends(device),
+    ) -> IngestReceipt:
+        try:
+            return await store.ingest(principal, batch)
+        except BatchConflictError as error:
+            raise HTTPException(
+                status_code=409, detail="batch id or sequence was reused with different content"
+            ) from error
+
+    @app.get("/v1/ingest/status", response_model=DeviceStatus)
+    async def ingest_status(
+        principal: DevicePrincipal = Depends(device),
+    ) -> DeviceStatus:
+        return DeviceStatus(device_id=principal.device_id)
+
+    @app.get("/v1/dashboard", response_model=DashboardPayload)
+    async def dashboard(
+        year: int = Query(ge=2020, le=2100),
+        day: date | None = Query(default=None),
+        user_id=Depends(browser_user),
+    ) -> DashboardPayload:
+        if day is not None and day.year != year:
+            raise HTTPException(status_code=422, detail="day must fall within year")
+        return await store.dashboard(user_id, year, day)
+
+    @app.post(
+        "/v1/sessions/{session_id}/summaries",
+        response_model=SummaryRequestResponse,
+        status_code=202,
+    )
+    async def request_summary(
+        session_id: int,
+        user_id=Depends(browser_user),
+    ) -> SummaryRequestResponse:
+        queued = await store.request_summary(user_id, session_id)
+        if not queued:
+            raise HTTPException(status_code=404, detail="session not found")
+        return SummaryRequestResponse(session_id=str(session_id), state="pending")
+
+    return app
