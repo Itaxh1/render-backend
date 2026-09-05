@@ -11,6 +11,13 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
+For the SQL regression tests, set `REXY_TEST_DATABASE_URL` to a disposable
+PostgreSQL database and run the same test command. Those tests execute the
+application's queries against connection-local temporary tables, covering
+account isolation, saved TLDR selection, duplicate/reset token counters,
+midnight/year predecessors, and legacy yearly totals. Without that test-only
+variable, the SQL cases are skipped; parameter-contract tests still run.
+
 Copy `.env.example` to `.env` or configure the listed values in your process
 manager. The web service needs `DATABASE_URL`, `SUPABASE_URL`,
 `SUPABASE_PUBLISHABLE_KEY`, and `REXY_WEB_ORIGIN`. The worker needs only
@@ -106,6 +113,13 @@ task in the API recomputes those days from events. Dirty rows stay locked until
 recompute commits, so concurrent uploads re-dirty them without lost updates.
 This task runs without Grok or a summary worker. Missing Codex durations remain
 unknown even when a result arrives much later than the invocation.
+
+Day sessions are selected with one indexed day scan before joining titles and
+saved summaries. Token calculation bounds the session set to the requested
+range, then retains each selected session's earlier usage for accurate deltas.
+The legacy endpoint uses its whole year for that range. The bounded array
+lookup uses the existing usage index; no additional index or migration is
+required. Refresh still reads from the database, without waiting for Grok.
 
 The live smoke test also sends a maximum-size 500-record batch, retries it,
 checks revision updates and cross-midnight rollups, and revokes its temporary

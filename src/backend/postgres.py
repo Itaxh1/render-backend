@@ -399,6 +399,11 @@ class PostgresStore:
             session_rows = await (
                 await connection.execute(
                     """
+                    with active as (
+                      select distinct session_id
+                      from public.events
+                      where user_id = %s and local_day = %s
+                    )
                     select s.id, s.source,
                            coalesce(
                              nullif(s.title, ''), nullif(left(first_prompt.content_preview, 120), ''),
@@ -413,7 +418,8 @@ class PostgresStore:
                              when job.status = 'failed' then 'failed'
                              else 'not_requested'
                            end as summary_state
-                    from public.sessions s
+                    from active a
+                    join public.sessions s on s.user_id = %s and s.id = a.session_id
                     left join lateral (
                       select tldr
                       from public.summaries sm
@@ -432,15 +438,9 @@ class PostgresStore:
                     ) first_prompt on true
                     left join private.summary_jobs job
                       on job.user_id = s.user_id and job.session_id = s.id
-                    where s.user_id = %s and exists (
-                      select 1 from public.events selected_event
-                      where selected_event.user_id = s.user_id
-                        and selected_event.session_id = s.id
-                        and selected_event.local_day = %s
-                    )
                     order by s.started_at, s.id
                     """,
-                    (selected_day, user_id, selected_day),
+                    (user_id, selected_day, selected_day, user_id),
                 )
             ).fetchall()
             event_rows = await (
@@ -475,10 +475,18 @@ class PostgresStore:
                     (user_id, selected_day),
                 )
             ).fetchall()
+            # Limit the session set, not its history: LAG needs earlier samples
+            # across midnight/year boundaries. Legacy dashboard uses a year range.
+            # ANY(array(...)) gives the usage index a bounded session lookup;
+            # IN(subquery) can instead merge-scan unrelated historical sessions.
             token_rows = await (
                 await connection.execute(
                     """
-                    with samples as (
+                    with active as (
+                      select distinct session_id
+                      from public.events
+                      where user_id = %s and local_day >= %s and local_day < %s
+                    ), samples as (
                       select e.local_day, s.source, e.session_id, e.created_at, e.id,
                              e.usage_cumulative,
                              coalesce(e.token_input, 0) as token_input,
@@ -494,6 +502,7 @@ class PostgresStore:
                       from public.events e
                       join public.sessions s on s.id = e.session_id and s.user_id = e.user_id
                       where e.user_id = %s
+                        and e.session_id = any(array(select session_id from active))
                         and (e.token_input is not null or e.token_output is not null)
                       window w as (partition by e.session_id order by e.created_at, e.id)
                     ), deltas as (
@@ -529,7 +538,7 @@ class PostgresStore:
                     where local_day >= %s and local_day < %s
                     group by local_day, source order by local_day, source
                     """,
-                    (user_id, start, end),
+                    (user_id, start, end, user_id, start, end),
                 )
             ).fetchall()
             tool_rows = await (
