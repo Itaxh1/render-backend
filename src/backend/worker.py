@@ -58,14 +58,15 @@ class SummaryWorker:
                         set status = 'processing', locked_at = now(),
                             attempts = attempts + 1, updated_at = now()
                         where id = (
-                          select id from private.summary_jobs
-                          where available_at <= now()
+                          select j.id from private.summary_jobs j
+                          join public.sessions s on s.user_id = j.user_id and s.id = j.session_id
+                          where j.available_at <= now()
                             and (
-                              status = 'pending'
-                              or (status = 'processing' and locked_at < now() - interval '10 minutes')
+                              j.status = 'pending'
+                              or (j.status = 'processing' and j.locked_at < now() - interval '10 minutes')
                             )
-                          order by available_at, id
-                          for update skip locked
+                          order by s.last_event_at desc nulls last, j.available_at, j.id
+                          for update of j skip locked
                           limit 1
                         )
                         returning id, user_id::text, session_id, input_revision
@@ -173,10 +174,7 @@ class SummaryWorker:
                       user_id, session_id, input_revision, tldr, outcome,
                       unresolved, model, prompt_version
                     ) values (%s, %s, %s, %s, %s, %s, %s, 1)
-                    on conflict (user_id, session_id, input_revision) do update set
-                      tldr = excluded.tldr, outcome = excluded.outcome,
-                      unresolved = excluded.unresolved, model = excluded.model,
-                      generated_at = now()
+                    on conflict (user_id, session_id, input_revision) do nothing
                     """,
                     (
                         job.user_id, job.session_id, job.input_revision, result.tldr,
@@ -209,9 +207,9 @@ class SummaryWorker:
                 set status = case when attempts >= 6 then 'failed' else 'pending' end,
                     available_at = now() + make_interval(secs => least(300, power(2, attempts)::integer)),
                     locked_at = null, last_error = %s, updated_at = now()
-                where id = %s
+                where id = %s and input_revision = %s
                 """,
-                (message, job.id),
+                (message, job.id, job.input_revision),
             )
 
     async def run(self) -> None:

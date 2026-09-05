@@ -40,6 +40,12 @@ python -m backend.worker
 Use `python -m backend.worker --once` to process at most one job in an
 integration test. New sessions from the latest seven days are queued
 automatically; older sessions are queued only through the dashboard button.
+Eligible jobs run newest-activity-first, so current sessions are prioritized
+before older backfill. The 60-second inactivity debounce still applies. One
+worker makes one Grok request at a time; a backlog is not a database deletion.
+Saved TLDR revisions are immutable. Refresh reads the latest stored revision,
+and regeneration failures leave it intact. Requesting an already-summarized
+revision does not enqueue another paid call.
 
 ## Production wiring
 

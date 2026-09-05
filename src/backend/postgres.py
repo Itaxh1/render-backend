@@ -631,6 +631,13 @@ class PostgresStore:
                 ).fetchone()
                 if row is None or row["input_revision"] is None:
                     return False
+                saved = await (await connection.execute(
+                    """select 1 from public.summaries
+                       where user_id = %s and session_id = %s and input_revision = %s""",
+                    (user_id, session_id, row["input_revision"]),
+                )).fetchone()
+                if saved:
+                    return True
                 await connection.execute(
                     """
                     insert into private.summary_jobs(
