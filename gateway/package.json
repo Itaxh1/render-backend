@@ -1,0 +1,15 @@
+{
+  "name": "rexy-api-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "4.129.0"
+  }
+}

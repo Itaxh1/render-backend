@@ -1,0 +1,4 @@
+{"timestamp":"2026-09-04T12:00:00Z","type":"user","sessionId":"rexy-domain-smoke","cwd":"/synthetic/rexy-smoke","message":{"role":"user","content":"Verify the dashboard connection."}}
+{"timestamp":"2026-09-04T12:00:01Z","type":"assistant","sessionId":"rexy-domain-smoke","apiBlockIndex":0,"message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"Checking the synthetic fixture."},{"type":"tool_use","id":"smoke-tool-1","name":"Bash","input":{"command":"printf test"}}],"usage":{"input_tokens":12,"output_tokens":20}}}
+{"timestamp":"2026-09-04T12:00:02Z","type":"user","sessionId":"rexy-domain-smoke","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"smoke-tool-1","content":"test","is_error":false}]}}
+{"timestamp":"2026-09-04T12:00:03Z","type":"assistant","sessionId":"rexy-domain-smoke","message":{"role":"assistant","content":[{"type":"text","text":"The synthetic check passed."}]}}

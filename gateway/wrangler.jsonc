@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "rexy-api",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "rexy-api.baememory.com", "custom_domain": true }],
+  "vars": {
+    "UPSTREAM_ORIGIN": "https://rexy-api.tryoz.dev",
+    "WEB_ORIGIN": "https://rexy.baememory.com"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+    "logs": { "invocation_logs": false }
+  }
+}

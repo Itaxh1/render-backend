@@ -43,11 +43,33 @@ automatically; older sessions are queued only through the dashboard button.
 
 ## Production wiring
 
-Render runs `rexy-api` and `rexy-worker` from `render.yaml`. Configure the web
-origin as `https://rexy.tryoz.dev`; Rexy is built against
-`https://rexy-api.tryoz.dev`. The latter is currently a Cloudflare Tunnel
-hostname and can later become the stable custom domain for the Render web
-service without changing Linus commands already issued by the dashboard.
+The production web origin is `https://rexy.baememory.com`; Rexy calls
+`https://rexy-api.baememory.com`. Keep those stable public names when the
+underlying Cloudflare deployment changes so issued Linus install commands do
+not need to change.
+
+The dashboard is deployed as a Cloudflare static-assets Worker. The API domain
+currently runs the small Worker in `gateway/`, which forwards to the existing
+FastAPI origin through the `rexy-api.tryoz.dev` tunnel. FastAPI and the Grok
+worker still run on the origin machine; this is a domain cutover, not a complete
+migration of backend execution to Workers. The API requires that origin and its
+tunnel to remain running. No Render service has been deployed.
+
+Deploy and validate the gateway:
+
+```sh
+cd gateway
+npm ci
+npm run typecheck
+npm test
+npm run deploy
+```
+
+After building Linus, `REXY_LIVE_SMOKE=1 node test/live-smoke.mjs` runs the CLI
+against a synthetic transcript and temporary account through the deployed API.
+It verifies tool-result merging, token totals, and retry behavior, then deletes
+the test account and its data. It reads backend `.env` credentials without
+printing them and never scans the operator's transcripts.
 
 Google sign-in is configured in Supabase Auth, not in FastAPI. The Google Web
 OAuth client must use this authorized redirect URI:
@@ -57,6 +79,14 @@ https://ysnncnissneicxbecbex.supabase.co/auth/v1/callback
 ```
 
 Supabase must have Google enabled with that client ID/secret, `Site URL` set to
-`https://rexy.tryoz.dev`, and the same Rexy origin in the redirect allow list.
+`https://rexy.baememory.com`, and the same Rexy origin in the redirect allow
+list.
 These are one-time control-plane settings; Google credentials do not belong in
 the Render runtime environment.
+
+Google is enabled for the configured project, with Rexy as the Site URL and
+allowed return destination. To apply these specific settings again after an
+admin CLI login, run `node scripts/configure-google-auth.mjs --apply`. Omit
+`--apply` to preview the target origin and redirect list. The script uses the
+CLI credential store or `SUPABASE_ACCESS_TOKEN`, preserves existing redirects,
+and never prints the provider secret or management token.
