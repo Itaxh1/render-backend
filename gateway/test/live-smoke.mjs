@@ -47,7 +47,9 @@ try {
   const fixtureRoot = join(temporary, 'transcripts');
   await mkdir(join(fixtureRoot, '.claude/projects/smoke'), { recursive: true });
   await copyFile(join(here, 'fixtures/claude.jsonl'), join(fixtureRoot, '.claude/projects/smoke/session.jsonl'));
-  const cli = resolve(backend, '../linus/dist/cli.js');
+  const cli = process.env.REXY_SMOKE_CLI_PATH
+    ? resolve(process.env.REXY_SMOKE_CLI_PATH)
+    : resolve(backend, '../linus/dist/cli.js');
   const runCli = promisify(execFile);
   const environment = { ...process.env, LINUS_DATA_DIR: join(temporary, 'state'), REXY_SMOKE_TRANSCRIPTS: fixtureRoot };
   const first = await runCli(process.execPath, [
