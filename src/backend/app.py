@@ -15,6 +15,7 @@ from .models import (
     BrowserDevice,
     CalendarPayload,
     DayPayload,
+    EventDetail,
     ClaimResponse,
     DevicePrincipal,
     DeviceStatus,
@@ -157,6 +158,14 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
     async def day_detail(response: Response, date: date = Query(), user_id=Depends(browser_user)):
         response.headers["Cache-Control"] = "no-store"
         return await store.day_detail(user_id, date)
+
+    @app.get("/v1/events/{event_id}", response_model=EventDetail)
+    async def event_detail(event_id: str, response: Response, user_id=Depends(browser_user)):
+        response.headers["Cache-Control"] = "no-store"
+        detail = await store.event_detail(user_id, event_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        return detail
 
     @app.get("/v1/dashboard", response_model=DashboardPayload)
     async def dashboard(

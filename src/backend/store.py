@@ -13,6 +13,7 @@ from .models import (
     BrowserDevice,
     CalendarPayload,
     DayPayload,
+    EventDetail,
     DashboardEvent,
     DashboardPayload,
     DashboardRollup,
@@ -23,6 +24,7 @@ from .models import (
     IngestBatch,
     IngestReceipt,
 )
+from .usage import aggregate_usage
 
 
 def token_hash(token: str) -> bytes:
@@ -54,6 +56,7 @@ class Store(Protocol):
     async def revoke_device(self, user_id: UUID, device_id: UUID) -> bool: ...
     async def calendar(self, user_id: UUID, year: int) -> CalendarPayload: ...
     async def day_detail(self, user_id: UUID, day: date) -> DayPayload: ...
+    async def event_detail(self, user_id: UUID, event_id: str) -> EventDetail | None: ...
     async def ingest(
         self, principal: DevicePrincipal, batch: IngestBatch
     ) -> IngestReceipt: ...
@@ -212,7 +215,18 @@ class MemoryStore:
 
     async def day_detail(self, user_id: UUID, day: date) -> DayPayload:
         data = await self.dashboard(user_id, day.year, day)
-        return DayPayload(**data.model_dump(include={"sessions", "events", "tools", "story", "tokens"}))
+        return DayPayload(**data.model_dump(include={"sessions", "events", "tools", "story", "tokens", "tokens_by_source"}))
+
+    async def event_detail(self, user_id: UUID, event_id: str) -> EventDetail | None:
+        for principal, record in self._records.values():
+            if principal.user_id != user_id or record.event.type not in {"user", "agent", "tool"}:
+                continue
+            if f"{record.source_file_id}:{record.sequence}:{record.item_index}" == event_id:
+                event = record.event
+                return EventDetail(id=event_id, content=event.content_preview,
+                    tool_input=event.tool_input_preview, tool_output=event.tool_output_preview,
+                    truncated=event.truncated)
+        return None
 
     async def dashboard(
         self, user_id: UUID, year: int, day: date | None = None
@@ -220,7 +234,26 @@ class MemoryStore:
         visible = []
         sessions: dict[str, dict] = {}
         rolls: dict[str, dict] = {}
-        tokens: dict[str, dict[str, int]] = {}
+        usage_rows = []
+        previous_usage = {}
+        # Delta cumulative snapshots before filtering by year/day: the previous
+        # sample can belong to yesterday or the previous year.
+        for principal, record in sorted(self._records.values(),
+                key=lambda pair: (pair[1].event.created_at, pair[1].sequence, pair[1].item_index)):
+            event = record.event
+            if principal.user_id != user_id or (event.token_input is None and event.token_output is None):
+                continue
+            key = (principal.device_id, record.source, event.session_id)
+            raw = {field: getattr(event, field) or 0 for field in (
+                "token_input", "token_output", "token_cache_read", "token_cache_write", "token_thinking")}
+            previous = previous_usage.get(key, {})
+            delta = {field: value - previous[field]
+                     if event.usage_cumulative and field in previous and value >= previous[field]
+                     else value for field, value in raw.items()}
+            previous_usage[key] = raw
+            if event.local_day.year == year and (day is None or event.local_day == day):
+                usage_rows.append({"local_day": event.local_day, "source": record.source, **delta})
+        tokens, tokens_by_source = aggregate_usage(usage_rows)
         files: set[str] = set()
         source_bytes = 0
         for principal, record in self._records.values():
@@ -244,16 +277,6 @@ class MemoryStore:
             session["start"] = min(session["start"], timestamp)
             session["end"] = max(session["end"], timestamp)
             day_key = event.local_day.isoformat()
-            if any(value is not None for value in (
-                event.token_input, event.token_output, event.token_cache_read,
-                event.token_cache_write, event.token_thinking,
-            )):
-                total = tokens.setdefault(day_key, {"input": 0, "out": 0, "cr": 0, "cw": 0, "th": 0})
-                total["input"] += event.token_input or 0
-                total["out"] += event.token_output or 0
-                total["cr"] += event.token_cache_read or 0
-                total["cw"] += event.token_cache_write or 0
-                total["th"] += event.token_thinking or 0
             if event.type not in {"user", "agent", "tool"}:
                 continue
             status = event.tool_status if event.type == "tool" else "succeeded"
@@ -303,7 +326,8 @@ class MemoryStore:
             ],
             events=sorted(visible, key=lambda event: event.t),
             tools=[],
-            tokens={day: DashboardTokens(**values) for day, values in tokens.items()},
+            tokens=tokens,
+            tokens_by_source=tokens_by_source,
             story=[],
             stats=DashboardStats(
                 files=len(files), corpus_gb=round(source_bytes / 1_000_000_000, 2),

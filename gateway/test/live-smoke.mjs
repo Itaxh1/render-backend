@@ -55,9 +55,9 @@ try {
   const environment = { ...process.env, LINUS_DATA_DIR: join(temporary, 'state'), REXY_SMOKE_TRANSCRIPTS: fixtureRoot };
   const first = await runCli(process.execPath, [
     '--import', join(here, 'fixtures/isolated-home.mjs'), cli,
-    '--claim', claim.claim_token, '--api', api, '--once',
+    '--claim', claim.claim_token, '--api', api, '--once', '--verbose',
   ], { env: environment, timeout: 60_000 });
-  assert.match(first.stdout, /0 pending uploads/);
+  assert.match(first.stdout, /pending 0/);
 
   const after = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
   assert.equal(after.stats.strokes, 4);
@@ -68,11 +68,19 @@ try {
   assert.equal(after.events.filter(e => e.k === 'tool').length, 1);
   assert.equal(after.tokens['2026-09-04'].in, 12);
   assert.equal(after.tokens['2026-09-04'].out, 20);
+  assert.equal(after.tokens_by_source['2026-09-04']['claude-code'].total, 32);
+  const prompt = after.events.find(event => event.k === 'user');
+  const promptDetail = await json(`${api}/v1/events/${prompt.id}`, { headers });
+  assert.equal(promptDetail.content, 'Verify the dashboard connection.');
+  const tool = after.events.find(event => event.k === 'tool');
+  const toolDetail = await json(`${api}/v1/events/${tool.id}`, { headers });
+  assert.match(toolDetail.tool_input, /printf test/);
+  assert.equal(toolDetail.tool_output, 'test');
 
-  const again = await runCli(process.execPath, ['--import', join(here, 'fixtures/isolated-home.mjs'), cli, '--once'], {
+  const again = await runCli(process.execPath, ['--import', join(here, 'fixtures/isolated-home.mjs'), cli, '--once', '--verbose'], {
     env: environment, timeout: 60_000,
   });
-  assert.match(again.stdout, /0 new records/);
+  assert.match(again.stdout, /records 0/);
   const repeated = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
   assert.equal(repeated.stats.strokes, after.stats.strokes);
   const device = (await json(`${api}/v1/devices`, { headers }))[0];
@@ -84,6 +92,7 @@ try {
   // Exercise the maximum batch size, not just the four-event happy path.
   const credential = JSON.parse(await readFile(join(temporary, 'state/credentials.json'), 'utf8'));
   const deviceHeaders = { authorization: `Bearer ${credential.deviceToken}`, 'content-type': 'application/json' };
+  assert.equal((await fetch(`${api}/v1/events/${prompt.id}`, { headers: deviceHeaders })).status, 401);
   const records = Array.from({ length: 500 }, (_, i) => ({
     source: 'codex', source_file_id: 'c'.repeat(64), sequence: i, item_index: 0,
     revision: 1, stage: 'enriched', payload_hash: 'd'.repeat(64),
@@ -119,6 +128,22 @@ try {
   assert.equal(detail.tools.find(tool => tool.name === 'Bash').fail, 1);
   assert.ok(detail.events.filter(e => e.src === 'codex' && e.k === 'tool').every(e => e.ms === null),
     'late Codex results must not fabricate durations from timestamp differences');
+  // Real SQL regression: cumulative Codex usage crosses midnight, repeats, and
+  // cached input/thinking must not inflate total usage.
+  const usageRecords = [
+    ['2026-09-03', 100, 50, 80, 20], ['2026-09-04', 140, 70, 110, 30], ['2026-09-04', 140, 70, 110, 30],
+  ].map(([day, input, output, cached, thinking], index) => ({
+    ...records[0], sequence: 10_000 + index, event: {
+      session_id: 'bulk-0', type: 'usage', created_at: `${day}T23:00:0${index}Z`, local_day: day,
+      token_input: input, token_output: output, token_cache_read: cached, token_thinking: thinking, usage_cumulative: true,
+    },
+  }));
+  await json(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders,
+    body: JSON.stringify({ ...bulk, batch_id: randomUUID(), device_sequence: 100_003, records: usageRecords }) });
+  const usageDay = await json(`${api}/v1/day?date=2026-09-04`, { headers });
+  assert.deepEqual(usageDay.tokens_by_source['2026-09-04'].codex,
+    { in: 10, out: 20, cr: 30, cw: 0, th: 10, total: 60 });
+  console.log(JSON.stringify({ lazy_prompt_and_tool_previews: true, daily_agent_token_totals: true }));
   const calendarStarted = performance.now();
   let calendar;
   do {

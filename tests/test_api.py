@@ -173,6 +173,52 @@ def test_schema_limits_and_readiness() -> None:
         assert response.status_code == 422
 
 
+def test_event_previews_are_owned_and_device_tokens_cannot_read_them() -> None:
+    with TestClient(make_app()) as client:
+        _, token = connect_device(client)
+        record = event_record()
+        record["event"].update(tool_input_preview="npm test", tool_output_preview="42 passed", truncated=True)
+        assert client.post("/v1/ingest/batches", headers={"authorization": f"Bearer {token}"},
+                           json=batch(record)).status_code == 200
+        event_id = f'{record["source_file_id"]}:12:0'
+        path = f"/v1/events/{event_id}"
+        response = client.get(path, headers={"authorization": "Bearer browser-token"})
+        assert response.status_code == 200
+        assert response.json()["tool_input"] == "npm test"
+        assert response.json()["tool_output"] == "42 passed"
+        assert response.json()["truncated"] is True
+        assert response.headers["cache-control"] == "no-store"
+        assert client.get(path, headers={"authorization": "Bearer other-browser-token"}).status_code == 404
+        assert client.get(path, headers={"authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_daily_provider_totals_delta_cumulative_usage_across_midnight() -> None:
+    with TestClient(make_app()) as client:
+        _, token = connect_device(client)
+        records = []
+        for i, (day, source, inp, out, cached, written, thinking, cumulative) in enumerate([
+            ("2026-09-03", "codex", 100, 50, 80, 0, 20, True),
+            ("2026-09-04", "codex", 140, 70, 110, 0, 30, True),
+            ("2026-09-04", "codex", 140, 70, 110, 0, 30, True),
+            ("2026-09-04", "claude-code", 10, 20, 100, 5, 8, False),
+        ]):
+            record = event_record()
+            record.update(source=source, sequence=i)
+            record["event"].update(type="usage", local_day=day, created_at=f"{day}T12:00:0{i}Z",
+                token_input=inp, token_output=out, token_cache_read=cached, token_cache_write=written,
+                token_thinking=thinking, usage_cumulative=cumulative)
+            records.append(record)
+        payload = batch(records[0]); payload["records"] = records
+        assert client.post("/v1/ingest/batches", headers={"authorization": f"Bearer {token}"}, json=payload).status_code == 200
+        data = client.get("/v1/day?date=2026-09-04", headers={"authorization": "Bearer browser-token"}).json()
+        codex = data["tokens_by_source"]["2026-09-04"]["codex"]
+        claude = data["tokens_by_source"]["2026-09-04"]["claude-code"]
+        assert codex == {"in": 10, "out": 20, "cr": 30, "cw": 0, "th": 10, "total": 60}
+        assert claude == {"in": 10, "out": 20, "cr": 100, "cw": 5, "th": 8, "total": 135}
+        assert data["tokens"]["2026-09-04"]["in"] == 20
+        assert "2026-09-03" not in data["tokens_by_source"]
+
+
 def test_browser_dashboard_returns_ingested_events() -> None:
     app = make_app()
     with TestClient(app) as client:

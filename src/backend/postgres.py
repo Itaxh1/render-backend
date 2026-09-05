@@ -18,6 +18,7 @@ from .models import (
     BrowserDevice,
     CalendarPayload,
     DayPayload,
+    EventDetail,
     DashboardEvent,
     DashboardPayload,
     DashboardRollup,
@@ -31,6 +32,7 @@ from .models import (
     IngestReceipt,
 )
 from .store import BatchConflictError, InvalidClaimError, InvalidDeviceError, token_hash
+from .usage import aggregate_usage
 
 
 def _batch_hash(batch: IngestBatch) -> bytes:
@@ -137,7 +139,26 @@ class PostgresStore:
 
     async def day_detail(self, user_id: UUID, day: date) -> DayPayload:
         data = await self.dashboard(user_id, day.year, day, detail_only=True)
-        return DayPayload(**data.model_dump(include={"sessions", "events", "tools", "story", "tokens"}))
+        return DayPayload(**data.model_dump(include={"sessions", "events", "tools", "story", "tokens", "tokens_by_source"}))
+
+    async def event_detail(self, user_id: UUID, event_id: str) -> EventDetail | None:
+        if not event_id.isascii() or not event_id.isdecimal() or len(event_id) > 19 or int(event_id) > 9223372036854775807:
+            return None
+        async with self._pool.connection() as connection:
+            row = await (await connection.execute(
+                """
+                select e.content_preview, e.truncated,
+                       tc.input_preview, tc.output_preview
+                from public.events e
+                left join public.tool_calls tc on tc.event_id = e.id and tc.user_id = e.user_id
+                where e.user_id = %s and e.id = %s and e.type in ('user', 'agent', 'tool')
+                """, (user_id, int(event_id)),
+            )).fetchone()
+        if row is None:
+            return None
+        return EventDetail(id=event_id, content=row["content_preview"],
+                           tool_input=row["input_preview"], tool_output=row["output_preview"],
+                           truncated=row["truncated"])
 
     async def ready(self) -> bool:
         try:
@@ -458,7 +479,7 @@ class PostgresStore:
                 await connection.execute(
                     """
                     with samples as (
-                      select e.local_day, e.session_id, e.created_at, e.id,
+                      select e.local_day, s.source, e.session_id, e.created_at, e.id,
                              e.usage_cumulative,
                              coalesce(e.token_input, 0) as token_input,
                              coalesce(e.token_output, 0) as token_output,
@@ -471,11 +492,12 @@ class PostgresStore:
                              lag(coalesce(e.token_cache_write, 0)) over w as previous_cache_write,
                              lag(coalesce(e.token_thinking, 0)) over w as previous_thinking
                       from public.events e
+                      join public.sessions s on s.id = e.session_id and s.user_id = e.user_id
                       where e.user_id = %s
                         and (e.token_input is not null or e.token_output is not null)
                       window w as (partition by e.session_id order by e.created_at, e.id)
                     ), deltas as (
-                      select local_day,
+                      select local_day, source,
                              case when usage_cumulative then
                                case when previous_input is null or token_input < previous_input
                                  then token_input else token_input - previous_input end
@@ -498,14 +520,14 @@ class PostgresStore:
                                else token_thinking end as token_thinking
                       from samples
                     )
-                    select local_day, sum(token_input)::bigint as token_input,
+                    select local_day, source, sum(token_input)::bigint as token_input,
                            sum(token_output)::bigint as token_output,
                            sum(token_cache_read)::bigint as token_cache_read,
                            sum(token_cache_write)::bigint as token_cache_write,
                            sum(token_thinking)::bigint as token_thinking
                     from deltas
                     where local_day >= %s and local_day < %s
-                    group by local_day order by local_day
+                    group by local_day, source order by local_day, source
                     """,
                     (user_id, start, end),
                 )
@@ -564,6 +586,7 @@ class PostgresStore:
             st=(row["status"] if row["type"] == "tool" else "succeeded") or "unknown",
             n=row["tool_name"], ms=row["duration_ms"],
         ) for row in event_rows]
+        tokens, tokens_by_source = aggregate_usage(token_rows)
         return DashboardPayload(
             generated=datetime.now(timezone.utc),
             rollups=rollups,
@@ -579,11 +602,8 @@ class PostgresStore:
                 name=row["tool_name"], count=row["count"], ok=row["succeeded"],
                 fail=row["failed"], p50=row["p50"], p90=row["p90"], max=row["maximum"],
             ) for row in tool_rows],
-            tokens={row["local_day"].isoformat(): DashboardTokens(
-                input=row["token_input"], out=row["token_output"],
-                cr=row["token_cache_read"], cw=row["token_cache_write"],
-                th=row["token_thinking"],
-            ) for row in token_rows},
+            tokens=tokens,
+            tokens_by_source=tokens_by_source,
             story=[DashboardStory(
                 t=int(row["created_at"].timestamp() * 1000), d=row["local_day"],
                 src=row["source"], s=str(row["session_id"]), k=row["type"],

@@ -83,7 +83,13 @@ The dashboard has independent authenticated reads:
 - `GET /v1/calendar?year=2026`: cached daily counts, a change revision, pending
   rollup state, and a suggested active/idle refresh interval.
 - `GET /v1/day?date=2026-09-04`: selected-day sessions, event strokes, tools,
-  story, and backend-computed token totals.
+  story, and backend-computed token totals. `tokens_by_source[day][source]`
+  includes each agent's `total`, fresh `in`, `out`, cache reads `cr`, cache
+  writes `cw`, and thinking `th`. Claude adds separate cache usage; Codex
+  already includes cached input. Thinking is part of output, not an extra fee
+  or extra contribution to the total. Missing usage is omitted, not invented.
+- `GET /v1/events/{id}`: owner-only bounded prompt/response and tool input/output
+  previews, fetched only when inspected. Device credentials cannot read them.
 - `GET /v1/devices` and `POST /v1/devices/{id}/revoke`: owner-scoped connection
   status and revocation. Revocation retains collected history.
 
@@ -99,6 +105,8 @@ The live smoke test also sends a maximum-size 500-record batch, retries it,
 checks revision updates and cross-midnight rollups, and revokes its temporary
 device. Set `REXY_SMOKE_CLI_PATH` to an installed package's `dist/cli.js` to test
 the release artifact; set `REXY_API_BASE` to target a test origin instead.
+It also verifies lazy previews and per-agent token deltas across midnight,
+including repeated cumulative Codex samples that must contribute zero twice.
 
 Install claims are single-use and expire after ten minutes. An already paired
 Linus installation resumes with `npx --yes rexy-linus@latest`, without claim

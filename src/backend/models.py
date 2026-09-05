@@ -160,6 +160,18 @@ class DashboardTokens(StrictModel):
     th: int
 
 
+class AgentTokens(DashboardTokens):
+    total: int
+
+
+class EventDetail(StrictModel):
+    id: str
+    content: str | None = None
+    tool_input: str | None = None
+    tool_output: str | None = None
+    truncated: bool = False
+
+
 class DashboardStory(StrictModel):
     t: int
     d: date
@@ -182,6 +194,7 @@ class DashboardPayload(StrictModel):
     events: list[DashboardEvent]
     tools: list[DashboardTool]
     tokens: dict[str, DashboardTokens]
+    tokens_by_source: dict[str, dict[Source, AgentTokens]] = Field(default_factory=dict)
     story: list[DashboardStory]
     stats: DashboardStats
 
@@ -205,6 +218,7 @@ class DayPayload(StrictModel):
     tools: list[DashboardTool]
     story: list[DashboardStory]
     tokens: dict[str, DashboardTokens]
+    tokens_by_source: dict[str, dict[Source, AgentTokens]] = Field(default_factory=dict)
 
 
 class PublicConfig(StrictModel):
