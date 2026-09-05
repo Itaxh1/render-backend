@@ -71,6 +71,39 @@ It verifies tool-result merging, token totals, and retry behavior, then deletes
 the test account and its data. It reads backend `.env` credentials without
 printing them and never scans the operator's transcripts.
 
+## Ingest and dashboard performance
+
+`POST /v1/ingest/batches` groups session updates and pipelines event/tool writes
+inside one transaction. It commits the receipt with the data; retrying the
+same batch returns that receipt. Device revocation is rechecked under the
+transaction lock. Lower revisions are duplicates, not replacements.
+
+The dashboard has independent authenticated reads:
+
+- `GET /v1/calendar?year=2026`: cached daily counts, a change revision, pending
+  rollup state, and a suggested active/idle refresh interval.
+- `GET /v1/day?date=2026-09-04`: selected-day sessions, event strokes, tools,
+  story, and backend-computed token totals.
+- `GET /v1/devices` and `POST /v1/devices/{id}/revoke`: owner-scoped connection
+  status and revocation. Revocation retains collected history.
+
+The legacy `/v1/dashboard` remains compatible. New clients should load calendar
+and day independently, allowing the calendar to paint first. Counts are
+eventually consistent: ingestion marks affected days dirty, and a background
+task in the API recomputes those days from events. Dirty rows stay locked until
+recompute commits, so concurrent uploads re-dirty them without lost updates.
+This task runs without Grok or a summary worker. Missing Codex durations remain
+unknown even when a result arrives much later than the invocation.
+
+The live smoke test also sends a maximum-size 500-record batch, retries it,
+checks revision updates and cross-midnight rollups, and revokes its temporary
+device. Set `REXY_SMOKE_CLI_PATH` to an installed package's `dist/cli.js` to test
+the release artifact; set `REXY_API_BASE` to target a test origin instead.
+
+Install claims are single-use and expire after ten minutes. An already paired
+Linus installation resumes with `npx --yes rexy-linus@latest`, without claim
+arguments. A rejected claim does not erase previously saved credentials.
+
 Google sign-in is configured in Supabase Auth, not in FastAPI. The Google Web
 OAuth client must use this authorized redirect URI:
 

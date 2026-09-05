@@ -97,6 +97,18 @@ class DeviceStatus(StrictModel):
     pending_supported: bool = True
 
 
+class BrowserDevice(StrictModel):
+    id: UUID
+    name: str
+    platform: str
+    extractor_version: int
+    created_at: datetime
+    last_seen_at: datetime | None = None
+    last_upload_at: datetime | None = None
+    status: Literal["connected", "revoked", "expired"]
+    sessions: int = 0
+
+
 class DashboardEvent(StrictModel):
     t: int
     d: date
@@ -177,6 +189,22 @@ class DashboardPayload(StrictModel):
 class SummaryRequestResponse(StrictModel):
     session_id: str
     state: Literal["ready", "pending"]
+
+
+class CalendarPayload(StrictModel):
+    generated: datetime
+    rollups: dict[str, dict[Source, DashboardRollup]]
+    revision: int = 0
+    rollups_pending: bool = False
+    refresh_after_ms: int = 30000
+
+
+class DayPayload(StrictModel):
+    sessions: list[DashboardSession]
+    events: list[DashboardEvent]
+    tools: list[DashboardTool]
+    story: list[DashboardStory]
+    tokens: dict[str, DashboardTokens]
 
 
 class PublicConfig(StrictModel):

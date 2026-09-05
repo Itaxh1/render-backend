@@ -3,14 +3,18 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import AsyncIterator
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .auth import SupabaseJWTVerifier, TokenVerifier, bearer_token
 from .config import Settings
 from .models import (
+    BrowserDevice,
+    CalendarPayload,
+    DayPayload,
     ClaimResponse,
     DevicePrincipal,
     DeviceStatus,
@@ -22,7 +26,7 @@ from .models import (
     PublicConfig,
     SummaryRequestResponse,
 )
-from .store import BatchConflictError, InvalidClaimError, Store
+from .store import BatchConflictError, InvalidClaimError, InvalidDeviceError, Store
 
 
 def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None = None) -> FastAPI:
@@ -113,6 +117,17 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
             raise HTTPException(status_code=400, detail="invalid or expired claim") from error
         return ExchangeClaimResponse(device_id=device_id, device_token=token)
 
+    @app.get("/v1/devices", response_model=list[BrowserDevice])
+    async def list_devices(response: Response, user_id=Depends(browser_user)):
+        response.headers["Cache-Control"] = "no-store"
+        return await store.list_devices(user_id)
+
+    @app.post("/v1/devices/{device_id}/revoke", status_code=204)
+    async def revoke_device(device_id: UUID, user_id=Depends(browser_user)):
+        if not await store.revoke_device(user_id, device_id):
+            raise HTTPException(status_code=404, detail="device not found")
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.post("/v1/ingest/batches", response_model=IngestReceipt)
     async def ingest_batch(
         batch: IngestBatch,
@@ -124,12 +139,24 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
             raise HTTPException(
                 status_code=409, detail="batch id or sequence was reused with different content"
             ) from error
+        except InvalidDeviceError as error:
+            raise HTTPException(status_code=401, detail="invalid device token") from error
 
     @app.get("/v1/ingest/status", response_model=DeviceStatus)
     async def ingest_status(
         principal: DevicePrincipal = Depends(device),
     ) -> DeviceStatus:
         return DeviceStatus(device_id=principal.device_id)
+
+    @app.get("/v1/calendar", response_model=CalendarPayload)
+    async def calendar(response: Response, year: int = Query(ge=2020, le=2100), user_id=Depends(browser_user)):
+        response.headers["Cache-Control"] = "no-store"
+        return await store.calendar(user_id, year)
+
+    @app.get("/v1/day", response_model=DayPayload)
+    async def day_detail(response: Response, date: date = Query(), user_id=Depends(browser_user)):
+        response.headers["Cache-Control"] = "no-store"
+        return await store.day_detail(user_id, date)
 
     @app.get("/v1/dashboard", response_model=DashboardPayload)
     async def dashboard(

@@ -42,6 +42,7 @@ try {
   const headers = { authorization: `Bearer ${login.access_token}`, origin: 'https://rexy.baememory.com' };
   const before = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
   assert.equal(before.stats.strokes, 0);
+  assert.deepEqual(await json(`${api}/v1/devices`, { headers }), []);
   const claim = await json(`${api}/v1/install/claims`, { method: 'POST', headers });
 
   const fixtureRoot = join(temporary, 'transcripts');
@@ -74,6 +75,69 @@ try {
   assert.match(again.stdout, /0 new records/);
   const repeated = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
   assert.equal(repeated.stats.strokes, after.stats.strokes);
+  const device = (await json(`${api}/v1/devices`, { headers }))[0];
+  assert.equal(device.status, 'connected');
+  assert.equal(device.sessions, 1);
+  assert.ok(device.last_upload_at);
+  assert.ok(!('token_hash' in device));
+
+  // Exercise the maximum batch size, not just the four-event happy path.
+  const credential = JSON.parse(await readFile(join(temporary, 'state/credentials.json'), 'utf8'));
+  const deviceHeaders = { authorization: `Bearer ${credential.deviceToken}`, 'content-type': 'application/json' };
+  const records = Array.from({ length: 500 }, (_, i) => ({
+    source: 'codex', source_file_id: 'c'.repeat(64), sequence: i, item_index: 0,
+    revision: 1, stage: 'enriched', payload_hash: 'd'.repeat(64),
+    event: {
+      session_id: `bulk-${Math.floor(i / 100)}`, type: ['user', 'agent', 'tool', 'tool_result'][i % 4],
+      created_at: '2026-09-04T12:00:00Z', local_day: '2026-09-04',
+      tool_name: i % 4 === 2 ? 'Bash' : null,
+      tool_status: i % 4 === 3 ? 'succeeded' : 'unknown',
+      source_call_id: i % 4 >= 2 ? `call-${Math.floor(i / 4)}` : null,
+      content_preview: 'Synthetic batch performance test',
+    },
+  }));
+  const bulk = { protocol_version: 1, batch_id: randomUUID(), device_sequence: 100_000, extractor_version: 1, records };
+  const started = performance.now();
+  const receipt = await json(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders, body: JSON.stringify(bulk) });
+  const bulkMs = Math.round(performance.now() - started);
+  assert.equal(receipt.accepted, 500);
+  assert.ok(bulkMs < 20_000, `500-record ingest took ${bulkMs}ms (gateway budget: 30s)`);
+  assert.deepEqual(await json(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders, body: JSON.stringify(bulk) }), receipt);
+  const bulkDashboard = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
+  assert.equal(bulkDashboard.stats.strokes, 379);
+  assert.equal(bulkDashboard.sessions.length, 6);
+  assert.equal(bulkDashboard.tools.find(tool => tool.name === 'Bash').ok, 126);
+  assert.ok(bulkDashboard.events.filter(e => e.src === 'codex' && e.k === 'tool').every(e => e.ms === null));
+  const newBatch = { ...bulk, batch_id: randomUUID(), device_sequence: 100_001 };
+  const duplicates = await json(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders, body: JSON.stringify(newBatch) });
+  assert.equal(duplicates.accepted, 0); assert.equal(duplicates.duplicate, 500);
+  const late = { ...records[3], revision: 2, event: { ...records[3].event, tool_status: 'failed', local_day: '2026-09-05', created_at: '2026-09-05T00:01:00Z' } };
+  await json(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders,
+    body: JSON.stringify({ ...bulk, batch_id: randomUUID(), device_sequence: 100_002, records: [late] }) });
+  const detail = await json(`${api}/v1/day?date=2026-09-04`, { headers });
+  assert.equal(detail.events.length, 379);
+  assert.equal(detail.tools.find(tool => tool.name === 'Bash').fail, 1);
+  assert.ok(detail.events.filter(e => e.src === 'codex' && e.k === 'tool').every(e => e.ms === null),
+    'late Codex results must not fabricate durations from timestamp differences');
+  const calendarStarted = performance.now();
+  let calendar;
+  do {
+    calendar = await json(`${api}/v1/calendar?year=2026`, { headers });
+    if (!calendar.rollups_pending && calendar.rollups['2026-09-04']?.codex?.fail === 1) break;
+    await new Promise(resolve => setTimeout(resolve, 300));
+  } while (performance.now() - calendarStarted < 15_000);
+  assert.equal(calendar.rollups['2026-09-04'].codex.events, 375);
+  assert.equal(calendar.rollups['2026-09-04'].codex.fail, 1);
+  assert.ok(!('events' in calendar));
+  const readStarted = performance.now();
+  await json(`${api}/v1/calendar?year=2026`, { headers });
+  console.log(JSON.stringify({ calendar_ms: Math.round(performance.now() - readStarted), separate_day_detail: true, late_result_rollup_recomputed: true }));
+  const revoked = await fetch(`${api}/v1/devices/${device.id}/revoke`, { method: 'POST', headers });
+  assert.equal(revoked.status, 204);
+  assert.equal((await json(`${api}/v1/devices`, { headers }))[0].status, 'revoked');
+  const blocked = await fetch(`${api}/v1/ingest/batches`, { method: 'POST', headers: deviceHeaders, body: JSON.stringify(bulk) });
+  assert.equal(blocked.status, 401);
+  console.log(JSON.stringify({ bulk_500_ms: bulkMs, device_list_and_revocation: true }));
   console.log(JSON.stringify({ passed: true, api, strokes: after.stats.strokes, sessions: after.sessions.length, successful_tools: 1, input_tokens: 12, output_tokens: 20, retry_without_duplicates: true }));
 } finally {
   if (createdUser) {

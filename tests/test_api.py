@@ -12,10 +12,13 @@ from backend.store import MemoryStore
 
 
 USER_ID = uuid4()
+OTHER_USER_ID = uuid4()
 
 
 class FakeVerifier:
     async def verify(self, token: str) -> UUID:
+        if token == "other-browser-token":
+            return OTHER_USER_ID
         if token != "browser-token":
             raise HTTPException(status_code=401, detail="invalid access token")
         return USER_ID
@@ -215,3 +218,53 @@ def test_browser_dashboard_returns_ingested_events() -> None:
             headers={"authorization": f"Bearer {token}"},
         )
         assert denied.status_code == 401
+
+
+def test_device_connection_is_visible_before_events_and_revoke_blocks_uploads() -> None:
+    with TestClient(make_app()) as client:
+        browser = {"authorization": "Bearer browser-token"}
+        other = {"authorization": "Bearer other-browser-token"}
+        assert client.get("/v1/devices", headers=browser).json() == []
+        device_id, token = connect_device(client)
+        response = client.get("/v1/devices", headers=browser)
+        assert response.headers["cache-control"] == "no-store"
+        device = response.json()[0]
+        assert device["id"] == device_id
+        assert device["status"] == "connected"
+        assert device["name"] == "Test Mac"
+        assert device["sessions"] == 0
+        assert device["last_upload_at"] is None
+        assert "token_hash" not in device and "device_token" not in device
+        assert client.get("/v1/devices", headers=other).json() == []
+        assert client.post(f"/v1/devices/{device_id}/revoke", headers=other).status_code == 404
+        assert client.get("/v1/devices").status_code == 401
+        device_auth = {"authorization": f"Bearer {token}"}
+        assert client.get("/v1/devices", headers=device_auth).status_code == 401
+        assert client.post(f"/v1/devices/{device_id}/revoke", headers=device_auth).status_code == 401
+        payload = batch(event_record())
+        assert client.post("/v1/ingest/batches", headers=device_auth, json=payload).status_code == 200
+        device = client.get("/v1/devices", headers=browser).json()[0]
+        assert device["sessions"] == 1 and device["last_upload_at"] is not None
+        for _ in range(2):
+            assert client.post(f"/v1/devices/{device_id}/revoke", headers=browser).status_code == 204
+        assert client.get("/v1/devices", headers=browser).json()[0]["status"] == "revoked"
+        assert client.post("/v1/ingest/batches", headers=device_auth, json=payload).status_code == 401
+        assert client.get("/v1/dashboard?year=2026", headers=browser).json()["stats"]["strokes"] == 1
+
+
+def test_calendar_and_day_are_separate_and_scoped() -> None:
+    with TestClient(make_app()) as client:
+        _, token = connect_device(client)
+        client.post("/v1/ingest/batches", headers={"authorization": f"Bearer {token}"}, json=batch(event_record()))
+        browser = {"authorization": "Bearer browser-token"}
+        calendar = client.get("/v1/calendar?year=2026", headers=browser).json()
+        assert calendar["rollups"]["2026-09-04"]["codex"]["tools"] == 1
+        assert "events" not in calendar and "sessions" not in calendar
+        detail = client.get("/v1/day?date=2026-09-04", headers=browser)
+        assert detail.status_code == 200
+        assert detail.json()["events"][0]["k"] == "tool"
+        assert "rollups" not in detail.json()
+        for path in ("/v1/calendar?year=2026", "/v1/day?date=2026-09-04"):
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers={"authorization": f"Bearer {token}"}).status_code == 401
+        assert client.get("/v1/calendar?year=2026", headers={"authorization": "Bearer other-browser-token"}).json()["rollups"] == {}

@@ -10,6 +10,9 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from .models import (
+    BrowserDevice,
+    CalendarPayload,
+    DayPayload,
     DashboardEvent,
     DashboardPayload,
     DashboardRollup,
@@ -34,6 +37,10 @@ class BatchConflictError(Exception):
     pass
 
 
+class InvalidDeviceError(Exception):
+    pass
+
+
 class Store(Protocol):
     async def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -43,6 +50,10 @@ class Store(Protocol):
         self, claim_token: str, device_name: str, platform: str
     ) -> tuple[UUID, str]: ...
     async def authenticate_device(self, device_token: str) -> DevicePrincipal | None: ...
+    async def list_devices(self, user_id: UUID) -> list[BrowserDevice]: ...
+    async def revoke_device(self, user_id: UUID, device_id: UUID) -> bool: ...
+    async def calendar(self, user_id: UUID, year: int) -> CalendarPayload: ...
+    async def day_detail(self, user_id: UUID, day: date) -> DayPayload: ...
     async def ingest(
         self, principal: DevicePrincipal, batch: IngestBatch
     ) -> IngestReceipt: ...
@@ -65,6 +76,7 @@ class MemoryStore:
     def __init__(self) -> None:
         self._claims: dict[bytes, _Claim] = {}
         self._devices: dict[bytes, DevicePrincipal] = {}
+        self._device_details: dict[UUID, BrowserDevice] = {}
         self._events: dict[tuple[UUID, str, int, int], int] = {}
         self._records: dict[tuple[UUID, str, int, int], tuple[DevicePrincipal, object]] = {}
         self._receipts: dict[tuple[UUID, UUID], tuple[bytes, IngestReceipt]] = {}
@@ -90,7 +102,6 @@ class MemoryStore:
     async def exchange_claim(
         self, claim_token: str, device_name: str, platform: str
     ) -> tuple[UUID, str]:
-        del device_name, platform
         async with self._lock:
             claim = self._claims.get(token_hash(claim_token))
             if (
@@ -105,10 +116,44 @@ class MemoryStore:
             self._devices[token_hash(device_token)] = DevicePrincipal(
                 device_id=device_id, user_id=claim.user_id
             )
+            self._device_details[device_id] = BrowserDevice(
+                id=device_id, name=device_name, platform=platform,
+                extractor_version=1, created_at=datetime.now(timezone.utc),
+                status="connected",
+            )
             return device_id, device_token
 
     async def authenticate_device(self, device_token: str) -> DevicePrincipal | None:
-        return self._devices.get(token_hash(device_token))
+        principal = self._devices.get(token_hash(device_token))
+        if principal is None:
+            return None
+        detail = self._device_details[principal.device_id]
+        if detail.status != "connected":
+            return None
+        detail.last_seen_at = datetime.now(timezone.utc)
+        return principal
+
+    async def list_devices(self, user_id: UUID) -> list[BrowserDevice]:
+        result = []
+        for principal in self._devices.values():
+            if principal.user_id != user_id:
+                continue
+            detail = self._device_details[principal.device_id].model_copy()
+            detail.sessions = len({
+                (record.source, record.event.session_id)
+                for owner, record in self._records.values()
+                if owner.device_id == principal.device_id and owner.user_id == user_id
+            })
+            result.append(detail)
+        return sorted(result, key=lambda item: item.created_at, reverse=True)
+
+    async def revoke_device(self, user_id: UUID, device_id: UUID) -> bool:
+        async with self._lock:
+            if not any(p.user_id == user_id and p.device_id == device_id
+                       for p in self._devices.values()):
+                return False
+            self._device_details[device_id].status = "revoked"
+            return True
 
     async def ingest(
         self, principal: DevicePrincipal, batch: IngestBatch
@@ -120,6 +165,9 @@ class MemoryStore:
             ).encode("utf-8")
         ).digest()
         async with self._lock:
+            detail = self._device_details.get(principal.device_id)
+            if detail is None or detail.status != "connected":
+                raise InvalidDeviceError
             existing_receipt = self._receipts.get(receipt_key)
             if existing_receipt is not None:
                 previous_hash, receipt = existing_receipt
@@ -154,7 +202,17 @@ class MemoryStore:
             )
             self._receipts[receipt_key] = (request_hash, receipt)
             self._device_sequences[sequence_key] = batch.batch_id
+            detail.last_upload_at = datetime.now(timezone.utc)
+            detail.extractor_version = max(detail.extractor_version, batch.extractor_version)
             return receipt
+
+    async def calendar(self, user_id: UUID, year: int) -> CalendarPayload:
+        data = await self.dashboard(user_id, year)
+        return CalendarPayload(generated=data.generated, rollups=data.rollups)
+
+    async def day_detail(self, user_id: UUID, day: date) -> DayPayload:
+        data = await self.dashboard(user_id, day.year, day)
+        return DayPayload(**data.model_dump(include={"sessions", "events", "tools", "story", "tokens"}))
 
     async def dashboard(
         self, user_id: UUID, year: int, day: date | None = None
@@ -207,7 +265,7 @@ class MemoryStore:
                 k=event.type,
                 st=status,
                 n=event.tool_name,
-                ms=event.duration_ms,
+                ms=event.duration_ms if record.source == "claude-code" else None,
                 id=f"{record.source_file_id}:{record.sequence}:{record.item_index}",
             ))
             source_roll = rolls.setdefault(day_key, {}).setdefault(record.source, {
