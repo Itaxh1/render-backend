@@ -1,5 +1,7 @@
 import asyncio
+import json
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,6 +15,12 @@ from backend.worker import run_embedded_worker
 
 SETTINGS = Settings(database_url="postgresql://unused", supabase_url="https://example.supabase.co",
                     rexy_web_origin="http://localhost:5173")
+
+
+def test_container_runs_one_production_api_and_forwards_shutdown_signals():
+    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
+    command = json.loads(next(line[4:] for line in dockerfile.splitlines() if line.startswith("CMD ")))
+    assert command == ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
 
 
 def test_embedded_worker_does_not_block_readiness_and_stops_on_shutdown(monkeypatch):

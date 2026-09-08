@@ -74,6 +74,19 @@ a second database. Use the existing Supabase database's **session pooler** URL
 current prepared-statement/pipeline implementation. Keep secrets in Render's
 environment settings, never in the image, repository, or frontend.
 
+Select the `Itaxh1/render-backend` repository with the **Docker** runtime, not
+the React `Itaxh1/rexy` repository. Leave Docker Command blank to use the
+Dockerfile's production start command:
+
+```sh
+exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
+```
+
+Render supplies `PORT`. The shell uses `exec` so the API receives shutdown
+signals directly and can cancel its summary task and close database pools.
+Keep the frontend on Cloudflare; no `npm run dev` process belongs on this
+backend service.
+
 `REXY_EMBED_SUMMARIES=1` runs one Grok summary loop alongside the API in the same
 process. `XAI_API_KEY` is required in this mode. Run a single Uvicorn process;
 don't also start the standalone worker. Summary startup/errors do not block

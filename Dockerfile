@@ -11,4 +11,4 @@ RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
     && python -m pip install --no-cache-dir --no-deps .
 
 USER 10001
-CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

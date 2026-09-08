@@ -1,6 +1,7 @@
 services:
   - type: web
     name: rexy-api
+    repo: https://github.com/Itaxh1/render-backend
     runtime: docker
     plan: free
     region: virginia
