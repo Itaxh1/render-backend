@@ -66,6 +66,16 @@ runs the small Worker in `gateway/`; its `UPSTREAM_ORIGIN` selects the FastAPI
 deployment. Change that origin only after the new deployment passes readiness
 and authenticated ingestion tests. Issued Linus commands keep the same domain.
 
+Production backend: `https://rexy-api-stas.onrender.com`, Render Free in
+Virginia, service `srv-dafvcg9t0dsc73fujsgg`. The public API remains
+`https://rexy-api.baememory.com`; Cloudflare proxies it to Render, not the Mac.
+The frontend remains `https://rexy.baememory.com` on Cloudflare. Releases are
+deployed explicitly after tests:
+
+```sh
+render deploys create srv-dafvcg9t0dsc73fujsgg --commit <tested-commit> --output json --confirm
+```
+
 ### Render free deployment
 
 `render.yaml` defines **one free web service**, not a paid background worker or

@@ -8,7 +8,7 @@
   "preview_urls": false,
   "routes": [{ "pattern": "rexy-api.baememory.com", "custom_domain": true }],
   "vars": {
-    "UPSTREAM_ORIGIN": "https://rexy-api.tryoz.dev",
+    "UPSTREAM_ORIGIN": "https://rexy-api-stas.onrender.com",
     "WEB_ORIGIN": "https://rexy.baememory.com"
   },
   "observability": {
