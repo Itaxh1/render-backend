@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from datetime import date
 from typing import AsyncIterator
 from uuid import UUID
@@ -10,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .auth import SupabaseJWTVerifier, TokenVerifier, bearer_token
-from .config import Settings
+from .config import Settings, WorkerSettings
+from .worker import run_embedded_worker
 from .models import (
     BrowserDevice,
     CalendarPayload,
@@ -36,9 +38,20 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await store.open()
+        summary_task = None
+        if settings.embedded_summaries:
+            summary_task = asyncio.create_task(run_embedded_worker(WorkerSettings(
+                database_url=settings.database_url,
+                xai_api_key=settings.xai_api_key or "",
+                xai_model=settings.xai_model,
+            )), name="summary-worker")
         try:
             yield
         finally:
+            if summary_task is not None:
+                summary_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await summary_task
             await store.close()
 
     app = FastAPI(title="Rexy API", version="0.1.0", lifespan=lifespan)

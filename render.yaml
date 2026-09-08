@@ -2,9 +2,11 @@ services:
   - type: web
     name: rexy-api
     runtime: docker
+    plan: free
+    region: virginia
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    healthCheckPath: /healthz
+    healthCheckPath: /readyz
     envVars:
       - key: DATABASE_URL
         sync: false
@@ -14,15 +16,8 @@ services:
         sync: false
       - key: SUPABASE_PUBLISHABLE_KEY
         sync: false
-  - type: worker
-    name: rexy-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    dockerCommand: python -m backend.worker
-    envVars:
-      - key: DATABASE_URL
-        sync: false
+      - key: REXY_EMBED_SUMMARIES
+        value: "1"
       - key: XAI_API_KEY
         sync: false
       - key: XAI_MODEL

@@ -13,6 +13,7 @@ class Settings:
     xai_api_key: str | None = None
     supabase_publishable_key: str | None = None
     xai_model: str = "grok-4.3"
+    embedded_summaries: bool = False
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -23,6 +24,9 @@ class Settings:
             raise RuntimeError("DATABASE_URL is required")
         _require_http_url("SUPABASE_URL", supabase_url, https_only=True)
         _require_http_url("REXY_WEB_ORIGIN", web_origin, https_only=False)
+        embedded_summaries = os.environ.get("REXY_EMBED_SUMMARIES", "0") == "1"
+        if embedded_summaries and not os.environ.get("XAI_API_KEY"):
+            raise RuntimeError("XAI_API_KEY is required when REXY_EMBED_SUMMARIES=1")
         return cls(
             database_url=database_url,
             supabase_url=supabase_url.rstrip("/"),
@@ -30,6 +34,7 @@ class Settings:
             xai_api_key=os.environ.get("XAI_API_KEY") or None,
             supabase_publishable_key=os.environ.get("SUPABASE_PUBLISHABLE_KEY") or None,
             xai_model=os.environ.get("XAI_MODEL", "grok-4.3"),
+            embedded_summaries=embedded_summaries,
         )
 
 

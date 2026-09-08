@@ -62,11 +62,36 @@ underlying Cloudflare deployment changes so issued Linus install commands do
 not need to change.
 
 The dashboard is deployed as a Cloudflare static-assets Worker. The API domain
-currently runs the small Worker in `gateway/`, which forwards to the existing
-FastAPI origin through the `rexy-api.tryoz.dev` tunnel. FastAPI and the Grok
-worker still run on the origin machine; this is a domain cutover, not a complete
-migration of backend execution to Workers. The API requires that origin and its
-tunnel to remain running. No Render service has been deployed.
+runs the small Worker in `gateway/`; its `UPSTREAM_ORIGIN` selects the FastAPI
+deployment. Change that origin only after the new deployment passes readiness
+and authenticated ingestion tests. Issued Linus commands keep the same domain.
+
+### Render free deployment
+
+`render.yaml` defines **one free web service**, not a paid background worker or
+a second database. Use the existing Supabase database's **session pooler** URL
+(port 5432) for IPv4 connectivity; do not use the transaction pooler with the
+current prepared-statement/pipeline implementation. Keep secrets in Render's
+environment settings, never in the image, repository, or frontend.
+
+`REXY_EMBED_SUMMARIES=1` runs one Grok summary loop alongside the API in the same
+process. `XAI_API_KEY` is required in this mode. Run a single Uvicorn process;
+don't also start the standalone worker. Summary startup/errors do not block
+API readiness. Pending jobs and completed summaries stay in Supabase across
+restarts; an interrupted processing job is reclaimable after its existing
+10-minute lease expires. Seven-day automatic eligibility and newest-first
+ordering remain unchanged. Grok API usage is still billed separately.
+
+Render free web services sleep after 15 minutes without inbound activity and
+can take about a minute to wake. The UI checks `/readyz` before loading auth or
+dashboard data, retries transient failures, and offers manual retry after two
+minutes. Summaries and rollup processing pause while asleep and resume on wake.
+There is no keep-alive cron. Render's 750 free hours are shared across the
+workspace's free services; exhaustion or suspension is not fixed by retrying.
+See [Render's free-tier limits](https://render.com/docs/free).
+
+After a verified Render cutover, the API no longer needs the local Mac or
+Cloudflare Tunnel. Keep the previous origin available until smoke tests pass.
 
 Deploy and validate the gateway:
 

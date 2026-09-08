@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -225,6 +226,21 @@ class SummaryWorker:
                 await self.complete(job, await self.summarize(facts))
             except Exception as error:
                 await self.fail(job, error)
+
+
+async def run_embedded_worker(settings: WorkerSettings) -> None:
+    """Process durable jobs while the free web service is awake, off the request path."""
+    while True:
+        worker = SummaryWorker(settings)
+        try:
+            await worker.open()
+            await worker.run()
+        except Exception as error:
+            # A DB outage must not kill the API or expose connection credentials.
+            logging.getLogger(__name__).warning("summary worker restarting: %s", type(error).__name__)
+        finally:
+            await worker.close()
+        await asyncio.sleep(5)
 
 
 async def main(*, once: bool = False) -> None:
