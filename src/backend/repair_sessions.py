@@ -78,7 +78,18 @@ def merge_group(c, owner, source, key, ids):
         from public.tool_calls t join repair_event_map m on m.id=t.event_id
         where t.user_id=%s and t.session_id=any(%s) group by t.source_call_id""", (owner,ids))
     c.execute('delete from public.tool_calls where user_id=%s and session_id=any(%s)', (owner,ids))
-    removed = c.execute('delete from public.events e using repair_event_map m where e.id=m.id and m.id<>m.target').rowcount
+    removed = 0
+    # DELETE transition tables include the preview columns. Bound each one so
+    # a large transcript cannot exhaust the managed database's temporary disk.
+    # The outer transaction still makes the complete group atomic.
+    while True:
+        count = c.execute('''delete from public.events where id in (
+            select e.id from repair_event_map m join public.events e on e.id=m.id
+            where m.id<>m.target order by e.id limit 500
+        )''').rowcount
+        removed += count
+        if not count:
+            break
     c.execute('update public.events set session_id=%s where user_id=%s and session_id=any(%s)', (canonical,owner,ids))
     columns = ','.join(('source_call_id','event_id','revision','started_at','local_day',*fields))
     c.execute(f'insert into public.tool_calls(user_id,session_id,{columns}) select %s,%s,{columns} from repair_tools',
