@@ -1,4 +1,6 @@
 begin;
+set local lock_timeout='5s';
+set local statement_timeout='120s';
 
 -- Private material never enters calendar/day responses. Rotate generation after
 -- a database restore; rotate cursor_key to invalidate outstanding cursors.
@@ -53,11 +55,20 @@ revoke all on function private.bump_day_versions(uuid,date[],boolean,boolean,boo
   from public, anon, authenticated;
 
 alter table public.sessions add column summary_input_version bigint not null default 1;
-update public.sessions s set summary_input_version = greatest(
-  coalesce((select max(e.id) from public.events e where e.user_id=s.user_id and e.session_id=s.id),0),
-  coalesce((select max(sm.input_revision) from public.summaries sm where sm.user_id=s.user_id and sm.session_id=s.id),0),
-  coalesce((select max(j.input_revision) from private.summary_jobs j where j.user_id=s.user_id and j.session_id=s.id),0)
-) + 1;
+-- One grouped scan per source, not a backwards primary-key probe per session.
+with event_versions as materialized (
+  select user_id,session_id,max(id) revision from public.events group by user_id,session_id
+), summary_versions as materialized (
+  select user_id,session_id,max(input_revision) revision from public.summaries group by user_id,session_id
+), versions as (
+  select s.user_id,s.id,greatest(coalesce(e.revision,0),coalesce(sm.revision,0),coalesce(j.input_revision,0))+1 revision
+  from public.sessions s
+  left join event_versions e on e.user_id=s.user_id and e.session_id=s.id
+  left join summary_versions sm on sm.user_id=s.user_id and sm.session_id=s.id
+  left join private.summary_jobs j on j.user_id=s.user_id and j.session_id=s.id
+)
+update public.sessions s set summary_input_version=v.revision
+from versions v where v.user_id=s.user_id and v.id=s.id;
 alter table private.summary_jobs add column lease_token uuid;
 alter table private.summary_jobs add column requested_explicitly boolean not null default false;
 alter table public.rollup_dirty
