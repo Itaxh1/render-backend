@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rexy Session Coach"
+  short_description: "Turn session evidence into actionable agent feedback"
+  default_prompt: "Use $rexy-session-coach to review this coding session and propose an evidence-backed improvement with a verification checklist."
