@@ -3,7 +3,7 @@
 Canonical design: `V2/plan-day-loading.md`, §7 (plus the rollout gates in §9).
 This document records implementation status, not a second response specification.
 
-## Implemented locally
+## Implemented backend
 
 - `GET /v1/day/ribbon?date=YYYY-MM-DD&tz=America/Phoenix`: session headers,
   complete visible event skeleton, real local-midnight axis, and off-axis IDs.
@@ -82,7 +82,7 @@ Read-only production `EXPLAIN ANALYZE` and bidirectional `EXCEPT ALL`:
 
 These are individual database execution samples, **not page-load measurements**
 or p95s. The busiest-day sample does not meet the sub-second goal. Production
-schema/data were not changed. No paid Grok requests were made by the tests.
+schema/data were not changed by those benchmarks. No paid Grok requests were made by the tests.
 
 Reproduce the read-only production comparison with `scripts/benchmark-ribbon.py`;
 it accepts the account UUID and date explicitly, applies a read-only transaction
@@ -90,10 +90,10 @@ and statement timeout, and prints only timings/counts, not transcript content.
 
 ## Remaining gates before a full-plan release
 
-- Apply the migration and deploy in a coordinated writer cutover; do not expose
-  version-based caching while old ingestion/summary processes can bypass bumps.
-- Qualify the new `(user_id,event_id)` index and its write cost at production
-  scale. It is in the migration but has not been built in production.
+- The coordinated migration/API deployment is complete (see below). Keep old
+  ingestion/summary revisions stopped: they cannot maintain the new counters.
+- Qualify the new `(user_id,event_id)` index's write cost at production scale.
+  Both new indexes are valid in production; broad load testing remains.
 - Benchmark full response/auth/pool/serialization/transfer costs, 39,944-event
   browser rendering, 100 warm date switches, mobile and concurrent import load.
   No unconditional 100 ms promise is possible for uncached/network/cold starts.
@@ -108,7 +108,7 @@ and statement timeout, and prints only timings/counts, not transcript content.
 - `MemoryStore` is the legacy unit-test fake; split-endpoint integration tests use
   real disposable PostgreSQL, not a second in-memory implementation of SQL.
 
-## Controlled deployment checklist (not executed)
+## Controlled deployment checklist
 
 1. Back up production and record current deployed revision. Drain/stop all old
    writers and workers during an explicitly scheduled migration window. Linus
@@ -126,3 +126,29 @@ and statement timeout, and prints only timings/counts, not transcript content.
 
 No npm release or CLI upgrade is needed for the day-read split itself. No new
 secret or environment variable is required for these backend changes.
+
+## Production rollout: 2026-09-17 UTC
+
+- Backend commit `74650d7` is live on the existing free Render service, deploy
+  `dep-dalmkoek1f9s738ov9eg`, completed at 04:20:27 UTC. Frontend remains on
+  Cloudflare; no CLI release was needed.
+- Took an owner-only local custom-format backup of public/private/auth/migration
+  schemas and verified the entire archive can be read. This was an archive check,
+  not a restore drill. No backup or credentials were committed to Git.
+- Temporarily replaced the API process with a maintenance responder. Old writers
+  were deactivated before applying `20260917032555`; the normal Docker entrypoint
+  was then restored and the tested API/embedded worker deployed together.
+- Migration tracking confirms the migration, both indexes are valid, 208 day
+  version rows were initialized, and 131 saved summaries remained present.
+- Public health/readiness return 200. All three split routes appear in the live
+  OpenAPI document; unauthenticated reads correctly return 401. Legacy day route
+  remains. Production frontend-origin preflight succeeds with a 600-second max age.
+- Re-ran all 54 tests successfully. Supabase security advisors have no new warning;
+  the pre-existing disabled leaked-password protection warning remains.
+- Read-only calls from this Mac into production returned complete ribbons (82 and
+  39,944 events), ready summary/token sections, and paginated exchanges. These
+  include database-network transfer and Python conversion, not browser/API timing:
+  Sep 16 ribbon 1,068.5 ms, extras 1,011.3 ms; Jun 14 ribbon 12,348.6 ms,
+  extras 6,187.1 ms. The large ribbon was 5,107,558 bytes JSON / 156,488 bytes gzip.
+  These variable samples do **not** meet the performance goal; keep the remaining
+  latency/browser/cache gates open rather than claiming full-page sub-100 ms.
