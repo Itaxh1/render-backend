@@ -43,6 +43,9 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if hasattr(store, 'insights'):
+            store.insights.api_key = settings.xai_api_key
+            store.insights.model = settings.xai_model
         await store.open()
         summary_task = None
         if settings.embedded_summaries:
@@ -104,6 +107,37 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
 
     async def browser_user(request: Request):
         return await browser_verifier.verify(bearer_token(request))
+
+    def insights_service(response: Response):
+        response.headers['Cache-Control'] = 'no-store'
+        if not hasattr(store, 'insights'):
+            raise HTTPException(503, 'Profile storage is not configured')
+        return store.insights
+
+    @app.get('/v1/profile')
+    async def profile(response: Response, tz: str = Query('UTC', max_length=100), user_id=Depends(browser_user)):
+        result = await insights_service(response).snapshot(user_id, tz)
+        result.pop('projects')
+        return result
+
+    @app.get('/v1/projects')
+    async def projects(response: Response, tz: str = Query('UTC', max_length=100), user_id=Depends(browser_user)):
+        return await insights_service(response).projects(user_id, tz)
+
+    @app.get('/v1/projects/{project_id}/docs')
+    async def project_docs(project_id: UUID, response: Response, user_id=Depends(browser_user)):
+        from .project_docs import read_docs
+        return await read_docs(insights_service(response), user_id, project_id)
+
+    @app.post('/v1/projects/{project_id}/docs/generate', status_code=202)
+    async def generate_project_docs(project_id: UUID, response: Response, user_id=Depends(browser_user)):
+        from .project_docs import request_docs
+        return await request_docs(insights_service(response), user_id, project_id)
+
+    @app.post('/v1/projects/{project_id}/docs/cancel')
+    async def cancel_project_docs(project_id: UUID, response: Response, user_id=Depends(browser_user)):
+        from .project_docs import request_docs
+        return await request_docs(insights_service(response), user_id, project_id, cancel=True)
 
     async def device(request: Request) -> DevicePrincipal:
         principal = await store.authenticate_device(bearer_token(request))

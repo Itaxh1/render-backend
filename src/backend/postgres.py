@@ -16,6 +16,7 @@ from .day_reads import DayReads
 from .day_versions import bump_session_extras, year_revisions
 from .db_pool import pool
 from . import rollups as rollup_jobs
+from .insights import Insights
 
 from .models import (
     BrowserDevice,
@@ -52,14 +53,17 @@ class PostgresStore(DayReads):
         self._pool = pool(database_url, maximum=6, waiting=32)
         self._ingest_pool = pool(database_url, maximum=2, waiting=8)
         self._rollup_pool = pool(database_url, maximum=1, waiting=2)
+        self.insights = Insights(database_url)
 
     async def open(self) -> None:
         await self._pool.open(wait=True)
         await self._ingest_pool.open(wait=True)
         await self._rollup_pool.open(wait=True)
         self._rollup_task = asyncio.create_task(self._rollup_loop())
+        await self.insights.open()
 
     async def close(self) -> None:
+        await self.insights.close()
         self._rollup_task.cancel()
         with suppress(asyncio.CancelledError):
             await self._rollup_task
