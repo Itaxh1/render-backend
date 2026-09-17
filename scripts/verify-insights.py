@@ -41,11 +41,24 @@ async def main(args):
             counts = await (await c.execute("""select count(*) filter(where type='tool') tools,
                 count(distinct local_day) filter(where type in ('user','agent','tool') and local_day<=current_date) days
                 from public.events where user_id=%s""", (owner,))).fetchone()
+            project_counts = await (await c.execute("""select btrim(s.project_name) name,
+                count(distinct e.session_id) sessions,count(distinct e.local_day) days,
+                min(e.local_day)::text first_day,max(e.local_day)::text last_day
+                from public.events e join public.sessions s on s.user_id=e.user_id and s.id=e.session_id
+                where e.user_id=%s and e.type in ('user','agent','tool') and nullif(btrim(s.project_name),'') is not null
+                group by btrim(s.project_name)""",(owner,))).fetchall()
             plan = await (await c.execute('explain (analyze,format json) select profile,projects from private.account_insights where user_id=%s', (owner,))).fetchone()
         assert p['toolCalls'] == counts['tools'], (p['toolCalls'],counts['tools'])
         assert p['activeDays'] == counts['days']
+        projects = (await service.projects(owner, 'America/Phoenix'))['projects']
+        expected = {r['name']:r for r in project_counts}
+        assert len(projects) == len(expected)
+        for project in projects:
+            r=expected[project['name']]
+            assert (project['sessions'],project['days'],project['firstActive'],project['lastActive']) == (r['sessions'],r['days'],r['first_day'],r['last_day'])
         print(json.dumps({'verified':True,'tools':p['toolCalls'],'active_days':p['activeDays'], 'prompts':p['prompts'],
-                          'project_labels':p['projectsTotal'],'snapshot_sql_ms':plan['QUERY PLAN'][0]['Execution Time']}), flush=True)
+                          'project_labels':p['projectsTotal'],'all_project_session_day_counts_match_source':True,
+                          'snapshot_sql_ms':plan['QUERY PLAN'][0]['Execution Time']}), flush=True)
         if args.generate:
             projects = (await service.projects(owner, 'America/Phoenix'))['projects']
             project = max(projects, key=lambda p: (p['lastActive'],p['sessions']))
@@ -62,6 +75,7 @@ async def main(args):
             docs = saved['docs']
             body = docs['skillMd'].split('---',2)[2].strip()
             assert len(body)<=500 and docs['evidenceCount']>0
+            assert 0 < docs['sessionsCovered'] <= min(docs['evidenceCount'],project['sessions'])
             other = Insights(os.environ['DATABASE_URL'])
             await other.pool.open(wait=True)
             persisted = await read_docs(other, owner, project['id'])

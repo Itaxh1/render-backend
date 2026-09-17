@@ -101,12 +101,18 @@ def test_project_job_persistence_retry_cancel_and_purge(api, migrated_database, 
     refresh(migrated_database, owner)
     pid = client.get('/v1/projects').json()['projects'][0]['id']
     calls = []
+    mode = ['success']
+    running_service = []
     class FakeClient:
         def __init__(self, **kw): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def post(self, url, **kw):
             calls.append(kw)
+            if mode[0] == 'failure':
+                raise RuntimeError('Simulated provider outage')
+            if mode[0] == 'cancel':
+                await request_docs(running_service[0], owner, pid, cancel=True)
             p = json.loads(kw['json']['messages'][1]['content'])
             output = {'summary':'A UI project.', 'decisions':[{'text':'Use npm.', 'event_id':p['prompts'][0]['id'],'quote':'Use npm'}], 'skill':'Use npm. Verify the UI in a browser.'}
             class Response:
@@ -116,6 +122,7 @@ def test_project_job_persistence_retry_cancel_and_purge(api, migrated_database, 
     monkeypatch.setattr('backend.project_docs.httpx.AsyncClient', FakeClient)
     async def run():
         service = Insights(migrated_database)
+        running_service.append(service)
         service.api_key = 'test-only'
         await service.pool.open(wait=True)
         try:
@@ -134,6 +141,18 @@ def test_project_job_persistence_retry_cancel_and_purge(api, migrated_database, 
             await request_docs(service, owner, pid, cancel=True)
             assert not await run_next(service)
             assert (await read_docs(service, owner, pid))['docs'] == saved['docs']
+            # A provider outage must retain the last successful artifacts.
+            mode[0] = 'failure'
+            await request_docs(service, owner, pid)
+            assert await run_next(service)
+            failed = await read_docs(service, owner, pid)
+            assert failed['state'] == 'failed' and failed['docs'] == saved['docs']
+            # Cancel during the model call: its late response cannot publish.
+            mode[0] = 'cancel'
+            await request_docs(service, owner, pid)
+            assert await run_next(service)
+            canceled = await read_docs(service, owner, pid)
+            assert canceled['state'] == 'ready' and canceled['docs'] == saved['docs']
             async with service.pool.connection() as c:
                 await c.execute("update private.project_documents set requests_count=20 where user_id=%s", (owner,))
             with pytest.raises(HTTPException) as limit:
