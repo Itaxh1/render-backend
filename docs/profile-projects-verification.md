@@ -7,6 +7,9 @@ Backend hosted on Render; UI on Cloudflare at `rexy.baememory.com`.
 
 - Backend: 90 tests passed against a disposable local Postgres database.
 - UI: 100 tests passed; TypeScript and Vite production build passed.
+- Final npm audit: zero vulnerabilities, including development dependencies,
+  after updating Vitest to 4.1.11 and Wrangler to 4.133.0. The production asset
+  hash was unchanged; the full UI suite and deployment dry-run passed again.
 - Tests cover ownership, anonymous/device-token rejection, empty accounts,
   authentic counts, model-output citations and Unicode limits, durable results,
   generation failures, cancellation during a model call, quota enforcement and
