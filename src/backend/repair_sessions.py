@@ -150,15 +150,23 @@ def main():
         print(json.dumps({'duplicate_groups':sum(len(ids)>1 for ids in groups.values())}))
         if not args.apply:
             return
-        for (owner,source,key),ids in groups.items():
-            with c.transaction():
-                c.execute("set local lock_timeout='5s'; set local statement_timeout='120s'")
-                if len(ids)>1:
-                    print(json.dumps(merge_group(c,owner,source,key,sorted(ids))))
-                else:
-                    c.execute('insert into private.session_identity_keys values(%s,%s,%s,%s) on conflict do nothing',
-                              (owner,source,key,next(iter(ids))))
+        # Explicit transaction mode also protects maintenance writes from a
+        # pooled server connection left in a read-only default by an operator.
         with c.transaction():
+            c.execute('set transaction read write')
+            with c.pipeline():
+                for (owner,source,key),ids in groups.items():
+                    if len(ids)==1:
+                        c.execute('insert into private.session_identity_keys values(%s,%s,%s,%s) on conflict do nothing',
+                                  (owner,source,key,next(iter(ids))))
+        for (owner,source,key),ids in groups.items():
+            if len(ids)==1:
+                continue
+            with c.transaction():
+                c.execute("set transaction read write; set local lock_timeout='5s'; set local statement_timeout='120s'")
+                print(json.dumps(merge_group(c,owner,source,key,sorted(ids))))
+        with c.transaction():
+            c.execute('set transaction read write')
             print(json.dumps({'titles_updated':backfill_titles(c)}))
 
 
