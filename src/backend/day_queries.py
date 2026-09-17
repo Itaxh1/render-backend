@@ -27,15 +27,10 @@ with active as (
     and type in ('user','agent','tool') group by session_id
 )
 select s.id,s.source,s.model,s.started_at,coalesce(s.ended_at,s.last_event_at) ended_at,
-       coalesce(nullif(s.title,''),nullif(left(prompt.content_preview,120),''),nullif(s.project_name,''),'Untitled session') title,
+       coalesce(nullif(s.display_title,''),nullif(s.title,''),nullif(s.project_name,'')||' session','Untitled session') title,
        coalesce(nullif(s.project_name,''),'Unknown project') project_name,
        a.day_first,a.day_last
 from active a join public.sessions s on s.user_id=%s and s.id=a.session_id
-left join lateral (
-  select content_preview from public.events e where e.user_id=s.user_id and e.session_id=s.id
-    and e.type='user' and e.content_preview is not null
-  order by e.created_at,e.id limit 1
-) prompt on true
 order by a.day_first,s.id
 """
 

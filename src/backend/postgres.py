@@ -36,11 +36,12 @@ from .models import (
 )
 from .store import BatchConflictError, InvalidClaimError, InvalidDeviceError, token_hash
 from .usage import aggregate_usage
+from .batch_identity import batch_payload
 
 
 def _batch_hash(batch: IngestBatch) -> bytes:
     canonical = json.dumps(
-        batch.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        batch_payload(batch), sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(canonical).digest()
 
@@ -245,8 +246,8 @@ class PostgresStore(DayReads):
                        case when d.revoked_at is not null then 'revoked'
                             when d.token_expires_at <= now() then 'expired'
                             else 'connected' end as status,
-                       (select count(*) from public.sessions s
-                        where s.user_id = d.user_id and s.device_id = d.id) as sessions,
+                       (select count(distinct k.session_id) from private.session_identity_keys k
+                        where k.user_id=d.user_id and starts_with(k.identity_key,'device:'||d.id::text||':')) as sessions,
                        (select b.created_at from private.ingest_batches b
                         where b.user_id = d.user_id and b.device_id = d.id
                         order by b.device_sequence desc limit 1) as last_upload_at
@@ -388,8 +389,8 @@ class PostgresStore(DayReads):
                     )
                     select s.id, s.source,
                            coalesce(
-                             nullif(s.title, ''), nullif(left(first_prompt.content_preview, 120), ''),
-                             nullif(s.project_name, ''), 'Untitled session'
+                             nullif(s.display_title, ''), nullif(s.title, ''),
+                             nullif(s.project_name, '') || ' session', 'Untitled session'
                            ) as title,
                            coalesce(nullif(s.project_name, ''), 'Unknown project') as project_name,
                            s.model, s.started_at, coalesce(s.ended_at, s.last_event_at) as ended_at,
@@ -409,15 +410,6 @@ class PostgresStore(DayReads):
                       order by sm.input_revision desc
                       limit 1
                     ) summary on true
-                    left join lateral (
-                      select content_preview
-                      from public.events first_event
-                      where first_event.user_id = s.user_id
-                        and first_event.session_id = s.id and first_event.type = 'user'
-                        and first_event.content_preview is not null
-                      order by first_event.created_at, first_event.id
-                      limit 1
-                    ) first_prompt on true
                     left join private.summary_jobs job
                       on job.user_id = s.user_id and job.session_id = s.id
                     order by s.started_at, s.id

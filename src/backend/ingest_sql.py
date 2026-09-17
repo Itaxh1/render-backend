@@ -1,21 +1,7 @@
 """Fixed SQL for pipelined batch ingestion; all values remain bound parameters."""
 
 SESSION_UPSERT = """
-insert into public.sessions(
-  user_id, device_id, source, source_session_id,
-  title, project_name, model, started_at, last_event_at,
-  started_day, revision
-) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-on conflict (user_id, device_id, source, source_session_id)
-do update set
-  started_at = least(public.sessions.started_at, excluded.started_at),
-  started_day = least(public.sessions.started_day, excluded.started_day),
-  last_event_at = greatest(public.sessions.last_event_at, excluded.last_event_at),
-  title = coalesce(excluded.title, public.sessions.title),
-  project_name = coalesce(excluded.project_name, public.sessions.project_name),
-  model = coalesce(excluded.model, public.sessions.model),
-  revision = greatest(public.sessions.revision, excluded.revision)
-returning id
+select private.resolve_session(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) id
 """
 
 EVENT_UPSERT = """
@@ -31,7 +17,7 @@ insert into public.events(
   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s
 )
-on conflict (device_id, source_file_id, source_sequence, source_item_index)
+on conflict (user_id, session_id, source_sequence, source_item_index, payload_hash)
 do update set
   session_id = excluded.session_id,
   revision = excluded.revision,

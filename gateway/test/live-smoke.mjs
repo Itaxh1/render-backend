@@ -89,6 +89,19 @@ try {
   assert.ok(device.last_upload_at);
   assert.ok(!('token_hash' in device));
 
+  // A clean second installation of the same real transcript is one session,
+  // not a new conversation with duplicated tokens/tool calls.
+  const reconnectClaim = await json(`${api}/v1/install/claims`, { method: 'POST', headers });
+  await runCli(process.execPath, ['--import', join(here, 'fixtures/isolated-home.mjs'), cli,
+    '--claim', reconnectClaim.claim_token, '--api', api, '--once', '--verbose'], {
+      env: { ...environment, LINUS_DATA_DIR: join(temporary, 'second-state') }, timeout: 60_000,
+    });
+  const reimported = await json(`${api}/v1/dashboard?year=2026&day=2026-09-04`, { headers });
+  assert.equal(reimported.sessions.length, 1);
+  assert.equal(reimported.stats.strokes, 4);
+  assert.equal(reimported.tokens_by_source['2026-09-04']['claude-code'].total, 32);
+  assert.ok((await json(`${api}/v1/devices`, { headers })).every(d => d.sessions === 1));
+
   // Exercise the maximum batch size, not just the four-event happy path.
   const credential = JSON.parse(await readFile(join(temporary, 'state/credentials.json'), 'utf8'));
   const deviceHeaders = { authorization: `Bearer ${credential.deviceToken}`, 'content-type': 'application/json' };

@@ -75,7 +75,8 @@ def db():
         conn.execute("""
             create temp table sessions (
                 id bigint, user_id uuid, source text, title text, project_name text,
-                model text, started_at timestamptz, ended_at timestamptz, last_event_at timestamptz
+                model text, started_at timestamptz, ended_at timestamptz, last_event_at timestamptz,
+                display_title text
             );
             create temp table events (
                 id bigint, user_id uuid, session_id bigint, local_day date, created_at timestamptz,
@@ -92,7 +93,7 @@ def db():
 
 def session(db, sid, owner=OWNER, source='codex', title=None):
     db.execute("""insert into pg_temp.sessions values
-        (%s, %s, %s, %s, 'project', 'model', '2025-12-31 00:00:00+00', null, '2026-09-04 00:00:00+00')""",
+        (%s, %s, %s, %s, 'project', 'model', '2025-12-31 00:00:00+00', null, '2026-09-04 00:00:00+00',null)""",
         (sid, owner, source, title))
 
 
@@ -116,6 +117,7 @@ def test_day_sessions_are_distinct_owned_and_keep_latest_saved_summary(db):
     session(db, 2)
     session(db, 1, OTHER, title='Foreign session')
     event(db, 1, 1, day=date(2026, 9, 3), text='Original goal')
+    db.execute("update pg_temp.sessions set display_title='Original goal' where user_id=%s and id=1", (OWNER,))
     event(db, 2, 1, kind='tool', text=None)
     event(db, 3, 1, kind='agent', text='Result')
     event(db, 4, 2, day=date(2026, 9, 2))

@@ -25,6 +25,7 @@ from .models import (
     IngestReceipt,
 )
 from .usage import aggregate_usage
+from .batch_identity import batch_payload
 from .day_contract import DayExtrasResponse, DayRibbonResponse, DayStoryResponse
 
 
@@ -169,7 +170,7 @@ class MemoryStore:
         receipt_key = (principal.device_id, batch.batch_id)
         request_hash = hashlib.sha256(
             json.dumps(
-                batch.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                batch_payload(batch), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).digest()
         async with self._lock:

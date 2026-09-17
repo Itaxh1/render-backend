@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from psycopg.types.json import Jsonb
 
 from .ingest_sql import EVENT_UPSERT, RESULT_UPDATE, SESSION_UPSERT, SUMMARY_UPSERT, TOOL_UPSERT
+from .session_identity import identity_keys
+from .session_titles import task_title, TITLE_UPDATE
 
 
 async def returning_rows(connection, statement, values):
@@ -51,17 +53,6 @@ async def write_records(connection, principal, batch):
     if not records:
         return 0, len(batch.records)
 
-    deleted = await (await connection.execute("""
-        select source,source_session_id from private.deleted_sessions
-        where user_id=%s and device_id=%s
-    """, (principal.user_id, principal.device_id))).fetchall()
-    tombstones = {(r['source'], r['source_session_id']) for r in deleted}
-    records = [r for r in records if (r.source, r.event.session_id) not in tombstones]
-    if not records:
-        # A durable deletion acknowledgement drains stale client queues without
-        # reviving data. Legacy receipts classify these as already handled.
-        return 0, len(batch.records)
-
     sessions = {}
     changed_days = set()
     for record in records:
@@ -70,8 +61,9 @@ async def write_records(connection, principal, batch):
         data = sessions.setdefault(key, {
             "title": None, "project": None, "model": None,
             "start": event.created_at, "end": event.created_at,
-            "day": event.local_day, "revision": record.revision,
+            "day": event.local_day, "revision": record.revision, "records": [],
         })
+        data['records'].append(record)
         for column, value in (("title", event.session_title), ("project", event.project_name), ("model", event.model)):
             if value is not None:
                 data[column] = value
@@ -86,11 +78,14 @@ async def write_records(connection, principal, batch):
     session_values = [
         (principal.user_id, principal.device_id, source, source_id,
          data["title"], data["project"], data["model"], data["start"], data["end"],
-         data["day"], data["revision"])
+         data["day"], data["revision"], identity_keys(principal, source, source_id, data['records']))
         for (source, source_id), data in sessions.items()
     ]
     session_rows = await returning_rows(connection, SESSION_UPSERT, session_values)
     session_ids = {key: row["id"] for key, row in zip(sessions, session_rows)}
+    records = [r for r in records if session_ids[(r.source,r.event.session_id)] is not None]
+    if not records:
+        return 0, len(batch.records)
     event_values = []
     for record in records:
         event = record.event
@@ -105,9 +100,18 @@ async def write_records(connection, principal, batch):
         ))
     event_rows = await returning_rows(connection, EVENT_UPSERT, event_values)
     written = [(r, row["id"]) for r, row in zip(records, event_rows) if row is not None]
+    if not written:
+        return 0, len(batch.records)
     # Calls precede results even when the two arrive out of order in this batch.
     result_cursors = []
     async with connection.pipeline():
+        for key, data in sessions.items():
+            candidates = [(r.event.created_at, task_title(r.event.content_preview)) for r in data['records']
+                          if r.event.type == 'user']
+            candidates = sorted((time, title) for time, title in candidates if title)
+            if candidates and session_ids[key] is not None:
+                time, title = candidates[0]
+                await connection.execute(TITLE_UPDATE, (title,time,principal.user_id,session_ids[key],time))
         for record, event_id in sorted(written, key=lambda pair: pair[0].event.type == "tool_result"):
             event = record.event
             session_id = session_ids[(record.source, event.session_id)]
@@ -142,7 +146,7 @@ async def write_records(connection, principal, batch):
             changed_days.add(row["local_day"])
 
     # Versions track corrections to existing IDs, not just append-only max(id).
-    affected_sessions = sorted(set(session_ids.values()) | {
+    affected_sessions = sorted({session_ids[(r.source,r.event.session_id)] for r,_ in written} | {
         old[record_key(r)]['session_id'] for r in records
         if record_key(r) in old and 'session_id' in old[record_key(r)]
     })

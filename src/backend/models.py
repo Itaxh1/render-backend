@@ -20,6 +20,7 @@ ToolStatus = Literal[
 
 class NormalizedEvent(StrictModel):
     session_id: Annotated[str, Field(min_length=1, max_length=256)]
+    native_session_id: UUID | None = None
     type: EventType
     role: Literal["user", "assistant"] | None = None
     created_at: datetime
