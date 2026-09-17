@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from backend.bulk_ingest import write_records
 from backend.models import DevicePrincipal, IngestBatch
 from backend.postgres import _batch_hash
-from backend.repair_sessions import identities, merge_group, backfill_titles
+from backend.repair_sessions import identities, merge_group, backfill_titles, repair_tool_aliases
 from backend.session_titles import task_title
 
 
@@ -176,3 +176,32 @@ def test_repair_deletes_more_than_one_chunk_atomically(migrated_database):
         report=merge_group(c,owner,source,key,sorted(ids))
         assert report['removed_events']==606
         assert c.execute('select count(*) n from public.events where user_id=%s',(owner,)).fetchone()['n']==606
+
+
+def test_tool_fallback_reimport_and_native_id_upgrade_keep_one_invocation(migrated_database):
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        a=device(c); b=device(c,a.user_id)
+    first=records(); first[2]['event']['source_call_id']='a'*64+':12345'
+    ingest(migrated_database,a,first)
+    updated=records('b',revision=2); updated[2]['event']['source_call_id']='b'*64+':12345'
+    ingest(migrated_database,b,updated)
+    updated=records('b',revision=3); updated[2]['event']['source_call_id']='native-call'
+    ingest(migrated_database,b,updated[2:3])
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        rows=c.execute('select source_call_id from public.tool_calls where user_id=%s',(a.user_id,)).fetchall()
+        assert rows==[{'source_call_id':'native-call'}]
+
+
+def test_tool_alias_repair_retains_result_and_native_identity(migrated_database):
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        a=device(c)
+    ingest(migrated_database,a,records())
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        c.execute('''insert into public.tool_calls(user_id,session_id,event_id,source_call_id,revision,
+            tool_name,status,started_at,local_day,input_preview)
+            select user_id,session_id,event_id,%s,1,tool_name,'unknown',started_at,local_day,'Known input'
+            from public.tool_calls where user_id=%s''',('a'*64+':12345',a.user_id))
+    with psycopg.connect(migrated_database,row_factory=dict_row,autocommit=True) as c:
+        assert repair_tool_aliases(c)==1
+        row=c.execute('select source_call_id,status,input_preview,output_preview from public.tool_calls where user_id=%s',(a.user_id,)).fetchone()
+        assert row=={'source_call_id':'call','status':'succeeded','input_preview':'Known input','output_preview':'All tests passed'}

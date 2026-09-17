@@ -121,7 +121,7 @@ async def write_records(connection, principal, batch):
             if event.type == "tool":
                 await connection.execute(TOOL_UPSERT, (
                     principal.user_id, session_id, event_id,
-                    event.source_call_id or f"{record.source_file_id}:{record.sequence}:{record.item_index}",
+                    event.source_call_id or f"event:{event_id}",
                     record.revision, event.tool_name or "unknown", event.tool_status,
                     event.tool_input_preview, event.tool_output_preview, event.exit_code,
                     event.created_at,

@@ -6,6 +6,7 @@ identity group atomically. DATABASE_URL is read only from the environment.
 import argparse
 import json
 import os
+import re
 from collections import defaultdict
 from uuid import UUID
 
@@ -172,6 +173,40 @@ def backfill_titles(c):
             where user_id=%s and session_id=%s),true,false,false)""", (s['user_id'],s['user_id'],s['id']))
         changed += 1
     return changed
+
+
+def repair_tool_aliases(c):
+    """Collapse installation-derived call IDs for the same verified event only."""
+    generated=re.compile(r'^(?:[0-9a-f]{32,128}:\d+(?::\d+)?|event:\d+)$')
+    groups=c.execute('''select user_id,event_id from public.tool_calls
+        group by user_id,event_id having count(*)>1''').fetchall()
+    removed=0
+    for group in groups:
+        with c.transaction():
+            c.execute('set transaction read write')
+            owner,event=group['user_id'],group['event_id']
+            rows=c.execute('select * from public.tool_calls where user_id=%s and event_id=%s for update',
+                           (owner,event)).fetchall()
+            native={r['source_call_id'] for r in rows if not generated.fullmatch(r['source_call_id'])}
+            if len(native)>1:
+                raise ValueError('conflicting native tool IDs; manual review required')
+            rows.sort(key=lambda r:(r['status'] not in ('unknown','running'),r['revision'],len(r['output_preview'] or '')),reverse=True)
+            keep=rows[0]
+            fields=('input_preview','output_preview','input_size','output_size','input_hash','output_hash',
+                    'exit_code','ended_at','duration_ms')
+            merged={f:next((r[f] for r in rows if r[f] is not None),None) for f in fields}
+            removed+=c.execute('delete from public.tool_calls where user_id=%s and id=any(%s)',
+                               (owner,[r['id'] for r in rows[1:]])).rowcount
+            key=next(iter(native),f'event:{event}')
+            setters=','.join(f'{f}=%s' for f in fields)
+            c.execute(f'update public.tool_calls set source_call_id=%s,{setters} where user_id=%s and id=%s',
+                      (key,*(merged[f] for f in fields),owner,keep['id']))
+            c.execute('select private.bump_day_versions(%s,%s::date[],true,true,false,false,true)',
+                      (owner,[keep['local_day']]))
+            c.execute('''insert into public.rollup_dirty(user_id,local_day) values(%s,%s)
+                on conflict(user_id,local_day) do update set generation=public.rollup_dirty.generation+1,dirtied_at=now()''',
+                (owner,keep['local_day']))
+    return removed
 
 
 def main():

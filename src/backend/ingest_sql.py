@@ -43,14 +43,32 @@ returning id
 """
 
 TOOL_UPSERT = """
+with incoming(user_id,session_id,event_id,source_call_id,revision,tool_name,status,
+              input_preview,output_preview,exit_code,started_at,ended_at,duration_ms,local_day) as (
+  values(%s::uuid,%s::bigint,%s::bigint,%s::text,%s::integer,%s::text,%s::text,
+         %s::text,%s::text,%s::integer,%s::timestamptz,%s::timestamptz,%s::bigint,%s::date)
+), updated as (
+  update public.tool_calls t set revision=n.revision,tool_name=n.tool_name,
+    source_call_id=case when n.source_call_id like 'event:%%' or exists(
+      select 1 from public.tool_calls other where other.user_id=n.user_id and other.session_id=n.session_id
+        and other.source_call_id=n.source_call_id and other.id<>t.id
+    ) then t.source_call_id else n.source_call_id end,
+    status=case when n.status in ('unknown','running') and t.status not in ('unknown','running')
+                then t.status else n.status end,
+    input_preview=coalesce(n.input_preview,t.input_preview),
+    output_preview=coalesce(n.output_preview,t.output_preview),
+    exit_code=coalesce(n.exit_code,t.exit_code),started_at=n.started_at,
+    ended_at=coalesce(n.ended_at,t.ended_at),duration_ms=coalesce(n.duration_ms,t.duration_ms),local_day=n.local_day
+  from incoming n where t.user_id=n.user_id and t.event_id=n.event_id and t.revision<n.revision
+  returning t.id
+)
 insert into public.tool_calls(
   user_id, session_id, event_id, source_call_id, revision,
   tool_name, status, input_preview, output_preview,
   exit_code, started_at, ended_at, duration_ms, local_day
-) values (
-  %s, %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s
-)
+) select n.* from incoming n where not exists(
+    select 1 from public.tool_calls t where t.user_id=n.user_id and t.event_id=n.event_id
+  )
 on conflict (user_id, session_id, source_call_id)
 do update set
   event_id = excluded.event_id,
