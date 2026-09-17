@@ -14,7 +14,10 @@ if (!database) throw new Error('Production database is not configured');
 const [command, ...args] = process.argv.slice(2);
 if (!command) throw new Error('A command is required');
 const uri = new URL(database);
+const model = process.env.REXY_INCLUDE_MODEL_KEY === '1' ? Object.fromEntries(vars
+  .filter(v => ['XAI_API_KEY','XAI_MODEL'].includes(v.envVar.key)).map(v => [v.envVar.key,v.envVar.value])) : {};
 const child = spawn(command,args,{shell:false,stdio:'inherit',env:{...process.env,DATABASE_URL:database,
+  ...model,
   PGHOST:uri.hostname,PGPORT:uri.port || '5432',PGUSER:decodeURIComponent(uri.username),
   PGPASSWORD:decodeURIComponent(uri.password),PGDATABASE:uri.pathname.slice(1),
   PGSSLMODE:uri.searchParams.get('sslmode') || 'require'}});

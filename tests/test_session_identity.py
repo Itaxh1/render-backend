@@ -4,6 +4,7 @@ import json
 from uuid import uuid4
 
 import psycopg
+import pytest
 from psycopg.rows import dict_row
 
 from backend.bulk_ingest import write_records
@@ -146,3 +147,12 @@ def test_identity_keys_and_resolver_are_not_browser_accessible(migrated_database
     with psycopg.connect(migrated_database,row_factory=dict_row) as c:
         assert not c.execute("select has_table_privilege('authenticated','private.session_identity_keys','SELECT') ok").fetchone()['ok']
         assert not c.execute("select has_function_privilege('authenticated',oid,'EXECUTE') ok from pg_proc where proname='resolve_session'").fetchone()['ok']
+
+
+def test_batch_titles_reject_unknown_ids_and_injected_setup():
+    from backend.repair_titles import validate
+    assert validate('{"titles":[{"id":1,"title":"Dashboard activity caching"}]}',[1])[0].title=='Dashboard activity caching'
+    for content in ['{"titles":[{"id":2,"title":"Other session title"}]}',
+                    '{"titles":[{"id":1,"title":"<environment_context>"}]}']:
+        with pytest.raises(ValueError):
+            validate(content,[1])
