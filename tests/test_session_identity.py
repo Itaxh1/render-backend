@@ -156,3 +156,23 @@ def test_batch_titles_reject_unknown_ids_and_injected_setup():
                     '{"titles":[{"id":1,"title":"<environment_context>"}]}']:
         with pytest.raises(ValueError):
             validate(content,[1])
+
+
+def test_repair_deletes_more_than_one_chunk_atomically(migrated_database):
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        a=device(c); b=device(c,a.user_id)
+    for principal,file in [(a,'a'),(b,'b')]:
+        if principal==b:
+            with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+                c.execute("delete from private.session_identity_keys where user_id=%s and identity_key like 'header:%%'",(a.user_id,))
+        ingest(migrated_database,principal,records(file))
+        for start,end in [(10,410),(410,612)]:
+            values=[]
+            for seq in range(start,end):
+                value=records(file)[1]; value['sequence']=seq; values.append(value)
+            ingest(migrated_database,principal,values)
+    with psycopg.connect(migrated_database,row_factory=dict_row) as c:
+        (owner,source,key),ids=next((k,v) for k,v in identities(c).items() if k[0]==a.user_id)
+        report=merge_group(c,owner,source,key,sorted(ids))
+        assert report['removed_events']==606
+        assert c.execute('select count(*) n from public.events where user_id=%s',(owner,)).fetchone()['n']==606

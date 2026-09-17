@@ -72,12 +72,37 @@ def merge_group(c, owner, source, key, ids):
               'input_hash','output_hash','exit_code','ended_at','duration_ms')
     selections = ','.join(f'(array_agg(t.{field} order by {order}) filter(where t.{field} is not null))[1] {field}'
                           for field in fields)
-    c.execute(f"""create temp table repair_tools on commit drop as
-        select t.source_call_id,(array_agg(m.target order by {order}))[1] event_id,
-          max(t.revision) revision,min(t.started_at) started_at,min(t.local_day) local_day,{selections}
+    # Keep large preview values out of whole-session temp tables. Only IDs are
+    # materialized; merge at most 500 tool invocations in memory at a time.
+    c.execute('set constraints tool_calls_event_owner_fk,tool_calls_session_owner_fk deferred')
+    c.execute(f'''create temp table repair_tool_map on commit drop as
+        select t.id,m.target event_target,first_value(t.id) over(
+          partition by t.source_call_id order by {order}) target
         from public.tool_calls t join repair_event_map m on m.id=t.event_id
-        where t.user_id=%s and t.session_id=any(%s) group by t.source_call_id""", (owner,ids))
-    c.execute('delete from public.tool_calls where user_id=%s and session_id=any(%s)', (owner,ids))
+        where t.user_id=%s and t.session_id=any(%s)''', (owner,ids))
+    c.execute('create unique index on repair_tool_map(id)')
+    c.execute('create index on repair_tool_map(target)')
+    last = 0
+    while True:
+        tools = c.execute(f'''with picked as materialized (
+            select id from repair_tool_map where id=target and id>%s order by id limit 500
+          ) select m.target,min(t.started_at) started_at,min(t.local_day) local_day,
+              max(t.revision) revision,{selections}
+            from picked p join repair_tool_map m on m.target=p.id
+            join public.tool_calls t on t.id=m.id group by m.target order by m.target''',(last,)).fetchall()
+        if not tools:
+            break
+        targets=[t['target'] for t in tools]
+        c.execute('''delete from public.tool_calls t using repair_tool_map m
+            where t.id=m.id and m.id<>m.target and m.target=any(%s)''',(targets,))
+        assignments=','.join(f'{f}=coalesce(t.{f},%s)' for f in fields)
+        with c.cursor() as cursor:
+            cursor.executemany(f'''update public.tool_calls t set session_id=%s,event_id=m.event_target,
+              started_at=%s,local_day=%s,revision=%s,{assignments}
+              from repair_tool_map m where t.id=%s and m.id=t.id and t.user_id=%s''',[
+                (canonical,t['started_at'],t['local_day'],t['revision'],*(t[f] for f in fields),t['target'],owner)
+                for t in tools])
+        last=targets[-1]
     removed = 0
     # DELETE transition tables include the preview columns. Bound each one so
     # a large transcript cannot exhaust the managed database's temporary disk.
@@ -90,10 +115,7 @@ def merge_group(c, owner, source, key, ids):
         removed += count
         if not count:
             break
-    c.execute('update public.events set session_id=%s where user_id=%s and session_id=any(%s)', (canonical,owner,ids))
-    columns = ','.join(('source_call_id','event_id','revision','started_at','local_day',*fields))
-    c.execute(f'insert into public.tool_calls(user_id,session_id,{columns}) select %s,%s,{columns} from repair_tools',
-              (owner,canonical))
+    c.execute('update public.events set session_id=%s where user_id=%s and session_id=any(%s) and session_id<>%s', (canonical,owner,ids,canonical))
     c.execute('update private.session_identity_keys set session_id=%s where user_id=%s and session_id=any(%s)',
               (canonical,owner,ids))
     c.execute("""insert into private.session_identity_keys(user_id,source,identity_key,session_id)
