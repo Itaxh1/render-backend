@@ -1,0 +1,135 @@
+{
+  "ribbon": {
+    "contract_version": 1,
+    "date": "2026-09-16",
+    "generated": "2026-09-16T18:00:00Z",
+    "revision": "fixture-ribbon-1",
+    "purge_revision": "fixture-purge-0",
+    "day_basis": "captured_local_day",
+    "axis": {
+      "timezone": "America/Phoenix",
+      "start_ms": 1789542000000,
+      "end_ms": 1789628400000
+    },
+    "off_axis_event_ids": [],
+    "snapshot_complete": true,
+    "sessions": [
+      {
+        "id": "9007199254740993",
+        "src": "codex",
+        "title": "Synthetic review session",
+        "proj": "Example project",
+        "model": null,
+        "start": 1789578000000,
+        "end": 1789578120000,
+        "d": "2026-09-16",
+        "day_first_ms": 1789578000000,
+        "day_last_ms": 1789578120000
+      }
+    ],
+    "events": [
+      {
+        "id": "9007199254740994",
+        "t": 1789578000000,
+        "d": "2026-09-16",
+        "src": "codex",
+        "s": "9007199254740993",
+        "k": "user",
+        "st": "unknown",
+        "n": null,
+        "ms": null
+      },
+      {
+        "id": "9007199254740995",
+        "t": 1789578060000,
+        "d": "2026-09-16",
+        "src": "codex",
+        "s": "9007199254740993",
+        "k": "tool",
+        "st": "failed",
+        "n": "Bash",
+        "ms": null
+      },
+      {
+        "id": "9007199254740996",
+        "t": 1789578120000,
+        "d": "2026-09-16",
+        "src": "codex",
+        "s": "9007199254740993",
+        "k": "agent",
+        "st": "unknown",
+        "n": null,
+        "ms": null
+      }
+    ],
+    "markers_state": "unsupported",
+    "markers": []
+  },
+  "extras": {
+    "contract_version": 1,
+    "date": "2026-09-16",
+    "generated": "2026-09-16T18:00:00Z",
+    "revision": "fixture-extras-1",
+    "ribbon_revision": "fixture-ribbon-1",
+    "purge_revision": "fixture-purge-0",
+    "sections": {
+      "summaries": "ready",
+      "tokens": "ready",
+      "findings": "unsupported"
+    },
+    "summaries_by_session": {
+      "9007199254740993": {
+        "summary": "Reviewed the sample; verification still needs attention.",
+        "summary_state": "ready",
+        "refresh_state": "pending",
+        "generated_at": "2026-09-16T17:02:00Z",
+        "model": "grok-4.3",
+        "input_revision": "12",
+        "is_stale": true
+      }
+    },
+    "tokens": {},
+    "tokens_by_source": {},
+    "usage_scope": "all_recorded_usage_on_captured_day",
+    "usage_only_session_count": 0,
+    "analysis_by_session": {
+      "9007199254740993": {
+        "state": "unsupported",
+        "input_revision": null
+      }
+    },
+    "findings": []
+  },
+  "story": {
+    "contract_version": 1,
+    "date": "2026-09-16",
+    "generated": "2026-09-16T18:00:00Z",
+    "revision": "fixture-story-1",
+    "series_revision": "fixture-story-1",
+    "purge_revision": "fixture-purge-0",
+    "has_newer_data": false,
+    "story": [
+      {
+        "id": "9007199254740994",
+        "t": 1789578000000,
+        "d": "2026-09-16",
+        "s": "9007199254740993",
+        "src": "codex",
+        "k": "user",
+        "x": "Review this synthetic sample.",
+        "truncated": false
+      },
+      {
+        "id": "9007199254740996",
+        "t": 1789578120000,
+        "d": "2026-09-16",
+        "s": "9007199254740993",
+        "src": "codex",
+        "k": "agent",
+        "x": "Verification remains incomplete.",
+        "truncated": false
+      }
+    ],
+    "next_cursor": null
+  }
+}

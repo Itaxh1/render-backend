@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import WorkerSettings
+from .day_versions import bump_session_extras
+from .db_pool import pool
 
 
 class SummaryOutput(BaseModel):
@@ -30,18 +30,17 @@ class Job:
     user_id: str
     session_id: int
     input_revision: int
+    lease_token: str
+
+
+class StaleSummaryInput(ValueError):
+    pass
 
 
 class SummaryWorker:
     def __init__(self, settings: WorkerSettings) -> None:
         self._settings = settings
-        self._pool = AsyncConnectionPool(
-            settings.database_url,
-            min_size=1,
-            max_size=3,
-            open=False,
-            kwargs={"row_factory": dict_row},
-        )
+        self._pool = pool(settings.database_url, maximum=1, waiting=2)
 
     async def open(self) -> None:
         await self._pool.open(wait=True)
@@ -57,11 +56,14 @@ class SummaryWorker:
                         """
                         update private.summary_jobs
                         set status = 'processing', locked_at = now(),
-                            attempts = attempts + 1, updated_at = now()
+                            attempts = attempts + 1, updated_at = now(), lease_token=gen_random_uuid()
                         where id = (
                           select j.id from private.summary_jobs j
                           join public.sessions s on s.user_id = j.user_id and s.id = j.session_id
                           where j.available_at <= now()
+                            and (j.requested_explicitly or
+                              (s.last_event_at at time zone 'UTC')::date between
+                              (now() at time zone 'UTC')::date-6 and (now() at time zone 'UTC')::date)
                             and (
                               j.status = 'pending'
                               or (j.status = 'processing' and j.locked_at < now() - interval '10 minutes')
@@ -70,18 +72,21 @@ class SummaryWorker:
                           for update of j skip locked
                           limit 1
                         )
-                        returning id, user_id::text, session_id, input_revision
+                        returning id, user_id::text, session_id, input_revision, lease_token::text
                         """
                     )
                 ).fetchone()
+                if row:
+                    await bump_session_extras(connection, row['user_id'], row['session_id'])
                 return Job(**row) if row else None
 
     async def facts(self, job: Job) -> dict[str, Any] | None:
         async with self._pool.connection() as connection:
+            await connection.execute('set transaction isolation level repeatable read read only')
             session = await (
                 await connection.execute(
                     """
-                    select source, title, project_name, model
+                    select source, title, project_name, model, summary_input_version
                     from public.sessions
                     where user_id = %s and id = %s
                     """,
@@ -90,6 +95,8 @@ class SummaryWorker:
             ).fetchone()
             if not session:
                 return None
+            if session['summary_input_version'] != job.input_revision:
+                raise StaleSummaryInput('Summary input changed before snapshot')
             rows = await (
                 await connection.execute(
                     """
@@ -99,10 +106,10 @@ class SummaryWorker:
                     left join public.tool_calls tc
                       on tc.user_id = e.user_id and tc.event_id = e.id
                     where e.user_id = %s and e.session_id = %s
-                      and e.id <= %s and e.type in ('user', 'agent', 'tool')
+                      and e.type in ('user', 'agent', 'tool')
                     order by e.created_at, e.id
                     """,
-                    (job.user_id, job.session_id, job.input_revision),
+                    (job.user_id, job.session_id),
                 )
             ).fetchall()
         prompts = [row["content_preview"] for row in rows if row["type"] == "user" and row["content_preview"]]
@@ -169,49 +176,65 @@ class SummaryWorker:
     async def complete(self, job: Job, result: SummaryOutput) -> None:
         async with self._pool.connection() as connection:
             async with connection.transaction():
-                await connection.execute(
-                    """
-                    insert into public.summaries(
-                      user_id, session_id, input_revision, tldr, outcome,
-                      unresolved, model, prompt_version
-                    ) values (%s, %s, %s, %s, %s, %s, %s, 1)
-                    on conflict (user_id, session_id, input_revision) do nothing
-                    """,
-                    (
-                        job.user_id, job.session_id, job.input_revision, result.tldr,
-                        result.outcome, result.unresolved, self._settings.xai_model,
-                    ),
-                )
+                session = await (await connection.execute("""
+                    select summary_input_version from public.sessions
+                    where user_id=%s and id=%s for update
+                """, (job.user_id, job.session_id))).fetchone()
+                lease = await (await connection.execute("""
+                    select input_revision from private.summary_jobs
+                    where id=%s and user_id=%s and session_id=%s and lease_token=%s
+                      and status='processing' for update
+                """, (job.id, job.user_id, job.session_id, job.lease_token))).fetchone()
+                if not session or not lease:
+                    return
+                fresh = session['summary_input_version'] == job.input_revision == lease['input_revision']
+                if fresh:
+                    await self._save_summary(connection, job, result)
                 await connection.execute(
                     """
                     update private.summary_jobs
-                    set status = 'completed', locked_at = null, last_error = null, updated_at = now()
-                    where id = %s and input_revision = %s
+                    set status=%s, locked_at=null, lease_token=null, last_error=null,
+                        attempts=case when %s then attempts else 0 end, updated_at=now()
+                    where id=%s and user_id=%s and lease_token=%s
                     """,
-                    (job.id, job.input_revision),
+                    ('completed' if fresh else 'pending', fresh, job.id, job.user_id, job.lease_token),
                 )
-                await connection.execute(
-                    """
-                    insert into public.dashboard_changes(user_id, session_id, local_day, change_kind)
-                    select s.user_id, s.id, s.started_day, 'summary'
-                    from public.sessions s where s.user_id = %s and s.id = %s
-                    """,
-                    (job.user_id, job.session_id),
-                )
+                await self._notify_summary(connection, job)
+
+    async def _save_summary(self, connection, job, result):
+        await connection.execute("""
+            insert into public.summaries(user_id,session_id,input_revision,tldr,outcome,unresolved,model,prompt_version)
+            values(%s,%s,%s,%s,%s,%s,%s,1)
+            on conflict (user_id, session_id, input_revision) do nothing
+        """, (job.user_id,job.session_id,job.input_revision,result.tldr,result.outcome,result.unresolved,self._settings.xai_model))
+
+    async def _notify_summary(self, connection, job):
+        await bump_session_extras(connection, job.user_id, job.session_id)
+        await connection.execute("""
+            insert into public.dashboard_changes(user_id,session_id,local_day,change_kind)
+            select user_id,session_id,local_day,'summary' from public.events
+            where user_id=%s and session_id=%s group by user_id,session_id,local_day
+        """, (job.user_id,job.session_id))
 
     async def fail(self, job: Job, error: Exception) -> None:
-        message = f"{type(error).__name__}: {str(error)[:300]}"
+        # Exception strings can contain provider bodies or credentials.
+        message = type(error).__name__
         async with self._pool.connection() as connection:
-            await connection.execute(
-                """
-                update private.summary_jobs
-                set status = case when attempts >= 6 then 'failed' else 'pending' end,
-                    available_at = now() + make_interval(secs => least(300, power(2, attempts)::integer)),
-                    locked_at = null, last_error = %s, updated_at = now()
-                where id = %s and input_revision = %s
-                """,
-                (message, job.id, job.input_revision),
-            )
+            async with connection.transaction():
+                await connection.execute('select id from public.sessions where user_id=%s and id=%s for update',
+                                         (job.user_id, job.session_id))
+                changed = await (await connection.execute("""
+                    update private.summary_jobs
+                    set status=case when input_revision <> %s then 'pending'
+                                    when attempts >= 6 then 'failed' else 'pending' end,
+                        available_at=greatest(available_at,now()+make_interval(secs=>least(300,power(2,attempts)::integer))),
+                        attempts=case when input_revision <> %s then 0 else attempts end,
+                        locked_at=null,lease_token=null,last_error=%s,updated_at=now()
+                    where id=%s and user_id=%s and session_id=%s and lease_token=%s and status='processing'
+                    returning id
+                """, (job.input_revision,job.input_revision,message,job.id,job.user_id,job.session_id,job.lease_token))).fetchone()
+                if changed:
+                    await self._notify_summary(connection, job)
 
     async def run(self) -> None:
         while True:

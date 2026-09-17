@@ -9,6 +9,8 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from psycopg import errors as pg_errors
+from psycopg_pool import PoolTimeout, TooManyRequests
 
 from .auth import SupabaseJWTVerifier, TokenVerifier, bearer_token
 from .config import Settings, WorkerSettings
@@ -30,6 +32,10 @@ from .models import (
     SummaryRequestResponse,
 )
 from .store import BatchConflictError, InvalidClaimError, InvalidDeviceError, Store
+from .day_contract import (
+    ChangedStoryCursor, DayExtrasResponse, DayRibbonResponse, DayStoryResponse,
+    ExpiredStoryCursor, InvalidStoryCursor, MissingDaySession, day_axis,
+)
 
 
 def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None = None) -> FastAPI:
@@ -55,6 +61,14 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
             await store.close()
 
     app = FastAPI(title="Rexy API", version="0.1.0", lifespan=lifespan)
+
+    async def database_busy(_request, _error):
+        return JSONResponse(status_code=503, content={'detail':'API temporarily unavailable'},
+                            headers={'Cache-Control':'no-store','Retry-After':'2'})
+
+    for error in (PoolTimeout, TooManyRequests, pg_errors.QueryCanceled, pg_errors.LockNotAvailable,
+                  pg_errors.DeadlockDetected, pg_errors.SerializationFailure):
+        app.add_exception_handler(error, database_busy)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.rexy_web_origin],
@@ -171,6 +185,38 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
     async def day_detail(response: Response, date: date = Query(), user_id=Depends(browser_user)):
         response.headers["Cache-Control"] = "no-store"
         return await store.day_detail(user_id, date)
+
+    @app.get("/v1/day/ribbon", response_model=DayRibbonResponse)
+    async def day_ribbon(response: Response, date: date = Query(), tz: str = Query(default='UTC', max_length=128),
+                         user_id=Depends(browser_user)):
+        response.headers['Cache-Control'] = 'no-store'
+        try:
+            day_axis(date, tz)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail='Invalid IANA timezone') from error
+        return await store.day_ribbon(user_id, date, tz)
+
+    @app.get("/v1/day/extras", response_model=DayExtrasResponse)
+    async def day_extras(response: Response, date: date = Query(), user_id=Depends(browser_user)):
+        response.headers['Cache-Control'] = 'no-store'
+        return await store.day_extras(user_id, date)
+
+    @app.get("/v1/day/story", response_model=DayStoryResponse)
+    async def day_story(response: Response, date: date = Query(),
+                        session_id: int | None = Query(default=None, ge=1, le=9223372036854775807),
+                        cursor: str | None = Query(default=None, max_length=4096),
+                        limit: int = Query(default=200, ge=1, le=500), user_id=Depends(browser_user)):
+        response.headers['Cache-Control'] = 'no-store'
+        try:
+            return await store.day_story(user_id, date, str(session_id) if session_id is not None else None, cursor, limit)
+        except ExpiredStoryCursor as error:
+            raise HTTPException(status_code=410, detail=str(error)) from error
+        except ChangedStoryCursor as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except InvalidStoryCursor as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except MissingDaySession as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/v1/events/{event_id}", response_model=EventDetail)
     async def event_detail(event_id: str, response: Response, user_id=Depends(browser_user)):

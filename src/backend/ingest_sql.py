@@ -102,12 +102,14 @@ where user_id = %s and session_id = %s and source_call_id = %s
 SUMMARY_UPSERT = """
 insert into private.summary_jobs(
   user_id, session_id, input_revision, status, available_at, updated_at
-) values (%s, %s, %s, 'pending', greatest(now(), %s + interval '60 seconds'), now())
+) values (%s, %s, %s, 'pending', greatest(now(), %s) + interval '60 seconds', now())
 on conflict (user_id, session_id) do update set
   input_revision = excluded.input_revision,
-  status = 'pending',
+  status = case when private.summary_jobs.status='processing' then 'processing' else 'pending' end,
   available_at = excluded.available_at,
-  locked_at = null,
+  locked_at = case when private.summary_jobs.status='processing' then private.summary_jobs.locked_at else null end,
+  lease_token = case when private.summary_jobs.status='processing' then private.summary_jobs.lease_token else null end,
+  attempts = case when private.summary_jobs.status='processing' then private.summary_jobs.attempts else 0 end,
   last_error = null,
   updated_at = now()
 where private.summary_jobs.input_revision < excluded.input_revision

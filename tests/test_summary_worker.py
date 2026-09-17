@@ -43,8 +43,8 @@ def test_queue_prioritizes_recent_activity_with_owner_join_and_skip_locked():
 
 def test_saved_summary_revision_cannot_be_overwritten_by_duplicate_completion():
     worker, connection = make_worker()
-    job = Job(id=1, user_id='owner', session_id=2, input_revision=3)
-    asyncio.run(worker.complete(job, SummaryOutput(tldr='Saved output.', outcome='completed')))
+    job = Job(id=1, user_id='owner', session_id=2, input_revision=3, lease_token='lease')
+    asyncio.run(worker._save_summary(connection, job, SummaryOutput(tldr='Saved output.', outcome='completed')))
     sql = connection.statements[0][0]
     assert 'on conflict (user_id, session_id, input_revision) do nothing' in sql
     assert 'delete' not in sql.lower()
@@ -53,7 +53,8 @@ def test_saved_summary_revision_cannot_be_overwritten_by_duplicate_completion():
 
 def test_old_failure_does_not_mark_new_revision_failed():
     worker, connection = make_worker()
-    asyncio.run(worker.fail(Job(id=1, user_id='owner', session_id=2, input_revision=3), ValueError('invalid output')))
-    sql, args = connection.statements[0]
-    assert 'where id = %s and input_revision = %s' in sql
-    assert args[-2:] == (1, 3)
+    asyncio.run(worker.fail(Job(id=1, user_id='owner', session_id=2, input_revision=3, lease_token='lease'), ValueError('secret error body')))
+    sql, args = connection.statements[1]
+    assert 'lease_token=%s' in sql
+    assert args[-4:] == (1, 'owner', 2, 'lease')
+    assert 'secret error body' not in str(args)

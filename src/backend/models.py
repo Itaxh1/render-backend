@@ -204,7 +204,16 @@ class SummaryRequestResponse(StrictModel):
     state: Literal["ready", "pending"]
 
 
+class DayRevisions(StrictModel):
+    ribbon: str
+    extras: str
+    story: str
+    purge: str
+
+
 class CalendarPayload(StrictModel):
+    contract_version: Literal[1] = 1
+    day_revisions: dict[str, DayRevisions] = Field(default_factory=dict)
     generated: datetime
     rollups: dict[str, dict[Source, DashboardRollup]]
     revision: int = 0

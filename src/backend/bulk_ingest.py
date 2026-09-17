@@ -38,7 +38,7 @@ async def write_records(connection, principal, batch):
     previous = await (await connection.execute(
         """
         select e.source_file_id, e.source_sequence, e.source_item_index,
-               e.revision, e.local_day
+               e.revision, e.local_day, e.session_id, e.type
         from public.events e
         join jsonb_to_recordset(%s) as k(f text, s bigint, i integer)
           on e.source_file_id = k.f and e.source_sequence = k.s and e.source_item_index = k.i
@@ -49,6 +49,17 @@ async def write_records(connection, principal, batch):
     records = [r for key, r in sorted(unique.items())
                if key not in old or r.revision > old[key]["revision"]]
     if not records:
+        return 0, len(batch.records)
+
+    deleted = await (await connection.execute("""
+        select source,source_session_id from private.deleted_sessions
+        where user_id=%s and device_id=%s
+    """, (principal.user_id, principal.device_id))).fetchall()
+    tombstones = {(r['source'], r['source_session_id']) for r in deleted}
+    records = [r for r in records if (r.source, r.event.session_id) not in tombstones]
+    if not records:
+        # A durable deletion acknowledgement drains stale client queues without
+        # reviving data. Legacy receipts classify these as already handled.
         return 0, len(batch.records)
 
     sessions = {}
@@ -130,26 +141,48 @@ async def write_records(connection, principal, batch):
         for row in await cursor.fetchall():
             changed_days.add(row["local_day"])
 
-    # One grouped read and one pipelined write phase, regardless of session count.
+    # Versions track corrections to existing IDs, not just append-only max(id).
+    affected_sessions = sorted(set(session_ids.values()) | {
+        old[record_key(r)]['session_id'] for r in records
+        if record_key(r) in old and 'session_id' in old[record_key(r)]
+    })
+    await connection.execute("""
+        update public.sessions set summary_input_version=summary_input_version+1
+        where user_id=%s and id=any(%s)
+    """, (principal.user_id, affected_sessions))
     summary_inputs = await (await connection.execute(
         """
-        select session_id, max(id) as input_revision, max(local_day) as active_day,
-               max(created_at) as last_event_at
-        from public.events where user_id = %s and session_id = any(%s)
-        group by session_id
-        """, (principal.user_id, list(session_ids.values())),
+        select s.id session_id, s.summary_input_version input_revision,
+               (max(e.created_at) at time zone 'UTC')::date active_day, max(e.created_at) last_event_at,
+               array_agg(distinct e.local_day) days
+        from public.sessions s join public.events e on e.user_id=s.user_id and e.session_id=s.id
+        where s.user_id=%s and s.id=any(%s)
+        group by s.id
+        """, (principal.user_id, affected_sessions),
     )).fetchall()
-    recent_cutoff = datetime.now(timezone.utc).date() - timedelta(days=7)
+    for data in summary_inputs:
+        changed_days.update(data['days'])
+    story_days, mutation_days = set(), set()
+    for record in records:
+        previous = old.get(record_key(record))
+        if record.event.type in ('user','agent'):
+            story_days.add(record.event.local_day)
+        if previous and (previous.get('type') in ('user','agent') or record.event.type in ('user','agent')):
+            mutation_days.update([previous['local_day'], record.event.local_day])
+    story_days.update(mutation_days)
+    today = datetime.now(timezone.utc).date()
+    recent_cutoff = today - timedelta(days=6)
     async with connection.pipeline():
         await connection.execute(
             """
             insert into public.rollup_dirty(user_id, local_day, dirtied_at)
             select %s, day, now() from unnest(%s::date[]) as day
-            on conflict (user_id, local_day) do update set dirtied_at = excluded.dirtied_at
+            on conflict (user_id, local_day) do update set dirtied_at = excluded.dirtied_at,
+                generation=public.rollup_dirty.generation+1
             """, (principal.user_id, sorted(changed_days)),
         )
         for data in summary_inputs:
-            if data["active_day"] >= recent_cutoff:
+            if recent_cutoff <= data["active_day"] <= today:
                 await connection.execute(SUMMARY_UPSERT, (
                     principal.user_id, data["session_id"], data["input_revision"], data["last_event_at"],
                 ))
@@ -159,4 +192,13 @@ async def write_records(connection, principal, batch):
             select %s, day, 'events' from unnest(%s::date[]) as day
             """, (principal.user_id, sorted(changed_days)),
         )
+        # Versions are locked last, after session/job writes, in day order.
+        await connection.execute("select private.bump_day_versions(%s,%s::date[],true,true,false)",
+                                 (principal.user_id, sorted(changed_days)))
+        if story_days:
+            await connection.execute("select private.bump_day_versions(%s,%s::date[],false,false,true)",
+                                     (principal.user_id, sorted(story_days)))
+        if mutation_days:
+            await connection.execute("select private.bump_day_versions(%s,%s::date[],false,false,false,true)",
+                                     (principal.user_id, sorted(mutation_days)))
     return len(written), len(batch.records) - len(written)

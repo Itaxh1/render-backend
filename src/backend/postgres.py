@@ -9,11 +9,13 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
-from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from psycopg_pool import AsyncConnectionPool
 from .bulk_ingest import write_records
 from .day_queries import RIBBON_EVENTS_SQL
+from .day_reads import DayReads
+from .day_versions import bump_session_extras, year_revisions
+from .db_pool import pool
+from . import rollups as rollup_jobs
 
 from .models import (
     BrowserDevice,
@@ -43,18 +45,17 @@ def _batch_hash(batch: IngestBatch) -> bytes:
     return hashlib.sha256(canonical).digest()
 
 
-class PostgresStore:
+class PostgresStore(DayReads):
     def __init__(self, database_url: str) -> None:
-        self._pool = AsyncConnectionPool(
-            database_url,
-            min_size=1,
-            max_size=10,
-            open=False,
-            kwargs={"row_factory": dict_row},
-        )
+        # One API process: 6 reads + 2 imports + 1 rollup; worker uses 1.
+        self._pool = pool(database_url, maximum=6, waiting=32)
+        self._ingest_pool = pool(database_url, maximum=2, waiting=8)
+        self._rollup_pool = pool(database_url, maximum=1, waiting=2)
 
     async def open(self) -> None:
         await self._pool.open(wait=True)
+        await self._ingest_pool.open(wait=True)
+        await self._rollup_pool.open(wait=True)
         self._rollup_task = asyncio.create_task(self._rollup_loop())
 
     async def close(self) -> None:
@@ -62,6 +63,8 @@ class PostgresStore:
         with suppress(asyncio.CancelledError):
             await self._rollup_task
         await self._pool.close()
+        await self._ingest_pool.close()
+        await self._rollup_pool.close()
 
     async def _rollup_loop(self) -> None:
         while True:
@@ -73,46 +76,15 @@ class PostgresStore:
             await asyncio.sleep(0.1 if worked else 2)
 
     async def refresh_rollups(self) -> bool:
-        async with self._pool.connection() as connection:
+        async with self._rollup_pool.connection() as connection:
             async with connection.transaction():
-                days = await (await connection.execute(
-                    """
-                    select user_id, local_day from public.rollup_dirty
-                    order by dirtied_at limit 32 for update skip locked
-                    """
-                )).fetchall()
-                if not days:
-                    return False
-                keys = Jsonb([{"u": str(r["user_id"]), "d": r["local_day"].isoformat()} for r in days])
-                # Holding the dirty rows until commit makes a concurrent ingest
-                # re-mark them AFTER this recompute. No notification can be lost.
-                async with connection.pipeline():
-                    await connection.execute(
-                        """
-                        delete from public.daily_rollups r using jsonb_to_recordset(%s) as k(u uuid, d date)
-                        where r.user_id = k.u and r.local_day = k.d
-                        """, (keys,),
-                    )
-                    await connection.execute(
-                        """
-                        insert into public.daily_rollups(user_id, local_day, source, sessions, events, tools, succeeded, failed)
-                        select e.user_id, e.local_day, s.source, count(distinct e.session_id),
-                               count(*) filter(where e.type in ('user', 'agent', 'tool')),
-                               count(tc.id), count(tc.id) filter(where tc.status = 'succeeded'),
-                               count(tc.id) filter(where tc.status = 'failed')
-                        from jsonb_to_recordset(%s) as k(u uuid, d date)
-                        join public.events e on e.user_id = k.u and e.local_day = k.d
-                        join public.sessions s on s.user_id = e.user_id and s.id = e.session_id
-                        left join public.tool_calls tc on tc.user_id = e.user_id and tc.event_id = e.id
-                        group by e.user_id, e.local_day, s.source
-                        """, (keys,),
-                    )
-                    await connection.execute(
-                        """
-                        delete from public.rollup_dirty r using jsonb_to_recordset(%s) as k(u uuid, d date)
-                        where r.user_id = k.u and r.local_day = k.d
-                        """, (keys,),
-                    )
+                job = await rollup_jobs.claim(connection)
+            if not job:
+                return False
+            async with connection.transaction():
+                rows = await rollup_jobs.compute(connection, job)
+            async with connection.transaction():
+                await rollup_jobs.publish(connection, job, rows)
         return True
 
     async def calendar(self, user_id: UUID, year: int) -> CalendarPayload:
@@ -124,8 +96,13 @@ class PostgresStore:
                        exists(select 1 from public.rollup_dirty where user_id = %s) as pending,
                        coalesce((select max(sequence) from public.dashboard_changes where user_id = %s), 0) as revision,
                        exists(select 1 from public.devices where user_id = %s and revoked_at is null
-                              and greatest(created_at, last_seen_at) > now() - interval '30 seconds') as active
-                """, (user_id, date(year, 1, 1), date(year + 1, 1, 1), user_id, user_id, user_id),
+                              and greatest(created_at, last_seen_at) > now() - interval '30 seconds') as active,
+                       (select generation from private.day_api_state where singleton) as generation,
+                       transaction_timestamp() as generated,
+                       coalesce((select jsonb_agg(v) from public.day_versions v
+                         where v.user_id=%s and v.local_day >= %s and v.local_day < %s),'[]') as versions
+                """, (user_id, date(year, 1, 1), date(year + 1, 1, 1), user_id, user_id, user_id,
+                      user_id, date(year, 1, 1), date(year + 1, 1, 1)),
             )).fetchone()
         rollups = {}
         for row in data["rollups"]:
@@ -134,7 +111,9 @@ class PostgresStore:
                 ok=row["succeeded"], fail=row["failed"],
             )
         return CalendarPayload(
-            generated=datetime.now(timezone.utc), rollups=rollups, revision=data["revision"],
+            generated=data['generated'], rollups=rollups, revision=data["revision"],
+            day_revisions=year_revisions(data['generation'], user_id, year,
+                [dict(row, local_day=date.fromisoformat(row['local_day'])) for row in data['versions']]),
             rollups_pending=data["pending"], refresh_after_ms=3000 if data["active"] or data["pending"] else 30000,
         )
 
@@ -294,8 +273,10 @@ class PostgresStore:
         self, principal: DevicePrincipal, batch: IngestBatch
     ) -> IngestReceipt:
         request_hash = _batch_hash(batch)
-        async with self._pool.connection() as connection:
+        async with self._ingest_pool.connection() as connection:
             async with connection.transaction():
+                # SET LOCAL is also respected by transaction-pooling proxies.
+                await connection.execute("set local statement_timeout='15s'; set local lock_timeout='2s'")
                 cursor = await connection.execute(
                     """
                     select id from public.devices
@@ -583,7 +564,7 @@ class PostgresStore:
             d=row["local_day"], src=row["source"], s=str(row["session_id"]),
             k=row["type"],
             st=(row["status"] if row["type"] == "tool" else "succeeded") or "unknown",
-            n=row["tool_name"], ms=row["duration_ms"],
+            n=row["tool_name"], ms=row["duration_ms"] if row['source'] == 'claude-code' else None,
         ) for row in event_rows]
         tokens, tokens_by_source = aggregate_usage(token_rows)
         return DashboardPayload(
@@ -621,9 +602,10 @@ class PostgresStore:
                 row = await (
                     await connection.execute(
                         """
-                        select max(e.id) as input_revision
-                        from public.events e
-                        where e.user_id = %s and e.session_id = %s
+                        select s.summary_input_version as input_revision
+                        from public.sessions s where s.user_id=%s and s.id=%s
+                          and exists(select 1 from public.events e where e.user_id=s.user_id and e.session_id=s.id)
+                        for update
                         """,
                         (user_id, session_id),
                     )
@@ -637,16 +619,27 @@ class PostgresStore:
                 )).fetchone()
                 if saved:
                     return True
-                await connection.execute(
+                changed = await (await connection.execute(
                     """
                     insert into private.summary_jobs(
-                      user_id, session_id, input_revision, status, available_at, updated_at
-                    ) values (%s, %s, %s, 'pending', now(), now())
+                      user_id, session_id, input_revision, status, available_at, updated_at,requested_explicitly
+                    ) values (%s, %s, %s, 'pending', now(), now(),true)
                     on conflict (user_id, session_id) do update set
                       input_revision = excluded.input_revision,
-                      status = 'pending', available_at = now(), locked_at = null,
+                      requested_explicitly=true,
+                      status = case when private.summary_jobs.status='processing' then 'processing' else 'pending' end,
+                      available_at = now(),
+                      locked_at = case when private.summary_jobs.status='processing' then private.summary_jobs.locked_at else null end,
+                      lease_token = case when private.summary_jobs.status='processing' then private.summary_jobs.lease_token else null end,
+                      attempts = case when private.summary_jobs.status='processing' then private.summary_jobs.attempts else 0 end,
                       last_error = null, updated_at = now()
+                    where private.summary_jobs.input_revision <> excluded.input_revision
+                       or private.summary_jobs.status in ('failed','completed')
+                       or not private.summary_jobs.requested_explicitly
+                    returning id
                     """,
                     (user_id, session_id, row["input_revision"]),
-                )
+                )).fetchone()
+                if changed:
+                    await bump_session_extras(connection, user_id, session_id)
                 return True
