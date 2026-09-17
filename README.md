@@ -199,3 +199,31 @@ admin CLI login, run `node scripts/configure-google-auth.mjs --apply`. Omit
 `--apply` to preview the target origin and redirect list. The script uses the
 CLI credential store or `SUPABASE_ACCESS_TOKEN`, preserves existing redirects,
 and never prints the provider secret or management token.
+
+## Saved Profile and Projects
+
+`GET /v1/profile?tz=…` and `GET /v1/projects?tz=…` read saved, account-scoped
+snapshots. The background insights task checks revisions and rebuilds changed
+accounts; the request path does not aggregate event history. Profiles report
+imported events, streaks, project labels and tool names. Sub-agent lineage,
+streak freezes and verified build-recovery badges remain explicitly untracked.
+Project labels are recorded folder names, not verified repository identities.
+
+`GET /v1/projects/{id}/docs` returns persisted files. Explicit authenticated
+`POST /v1/projects/{id}/docs/generate` queues Grok 4.3 using the existing platform
+key, with at most 20 generation requests per account per day. `/docs/cancel`
+fences late results. Previous successful files survive retries and failures.
+The model receives a bounded sample of redacted user prompts, not tool output.
+The UI reports the actual sampled-session coverage; files are suggestions to
+review, not proof of current repository state. Skill bodies are capped at 500
+Unicode code points, excluding YAML frontmatter.
+
+Both new tables live in the private schema with RLS and no browser grants.
+Ownership checks, deletion barriers and validation remain server-side.
+
+Operator checks: `scripts/verify-insights.py` compares snapshots against source
+SQL and optionally generates one real document. `scripts/verify-live-pages.mjs`
+checks the hosted pages in an isolated browser using a temporary login for an
+existing account (no email or new user). Set `QA_GENERATE=1` only when a real,
+billed generation click is intended. It signs out only its own test session.
+See [verification results](docs/profile-projects-verification.md).

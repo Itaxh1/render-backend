@@ -2,6 +2,7 @@
 // EXISTING account. No email is sent, no account is created, no secrets printed.
 // node --env-file=.env scripts/verify-live-pages.mjs existing@example.com
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 const { createClient } = createRequire(new URL('../../rexy/package.json',import.meta.url))('@supabase/supabase-js');
 const { chromium } = await import(process.env.QA_PLAYWRIGHT_MODULE || 'playwright');
@@ -40,12 +41,13 @@ try {
   const generated=projects.projects.find(p=>p.hasDocs);
   assert.ok(generated,'Expected the real Grok document saved by verify-insights');
   const docsResponse=await fetch(`${api}/v1/projects/${generated.id}/docs`,{headers});
-  const docs=await docsResponse.json();
+  let docs=await docsResponse.json();
   assert.equal(docs.state,'ready'); assert.ok(docs.docs.projectMd && docs.docs.skillMd);
   assert.equal((await fetch(`${api}/v1/profile`)).status,401);
   console.log(JSON.stringify({live_api_ms:timing,authenticated_profile:true,project_count:projects.total,saved_grok_docs:true,anonymous_denied:true}));
   browser=await chromium.launch({channel:'chrome',headless:true});
   const context=await browser.newContext({viewport:{width:1440,height:1000},timezoneId:'America/Phoenix'});
+  await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:web});
   await context.addInitScript(({url,session,publicKey,api})=>{
     localStorage.setItem(`sb-${new URL(url).hostname.split('.')[0]}-auth-token`,JSON.stringify(session));
     localStorage.setItem(`rexy:public-auth-config:${api}`,JSON.stringify({url,key:publicKey,saved:Date.now()}));
@@ -66,6 +68,33 @@ try {
   await page.getByRole('tab',{name:'SKILL.md',exact:true}).click();
   await page.getByRole('button',{name:'Source',exact:true}).click();
   assert.equal(await page.locator('.pj-source').textContent(),docs.docs.skillMd);
+  assert.equal(modelRequests.length,0,'Opening pages must never call Grok');
+  if(process.env.QA_GENERATE==='1') {
+    const previous=docs.docs.generatedAt;
+    const start=performance.now();
+    const finished=page.waitForResponse(async response=>{
+      if(!response.url().endsWith(`/v1/projects/${generated.id}/docs`) || response.status()!==200) return false;
+      const data=await response.json();
+      return data.state==='ready' && data.docs?.generatedAt!==previous;
+    },{timeout:180_000});
+    await page.getByRole('button',{name:'Regenerate',exact:true}).click();
+    docs=await (await finished).json();
+    await page.waitForFunction(text=>document.querySelector('.pj-source')?.textContent===text,docs.docs.skillMd);
+    console.log(JSON.stringify({ui_grok_generation_ms:Math.round(performance.now()-start),new_saved_result_rendered:true}));
+  }
+  await page.getByRole('button',{name:'Copy',exact:true}).click();
+  await page.getByRole('button',{name:'Copied',exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),docs.docs.skillMd);
+  const pendingDownload=page.waitForEvent('download');
+  await page.getByRole('button',{name:'Download',exact:true}).click();
+  const download=await pendingDownload;
+  assert.equal(download.suggestedFilename(),'SKILL.md');
+  assert.equal(await readFile(await download.path(),'utf8'),docs.docs.skillMd);
+  await page.screenshot({path:'/private/tmp/rexy-live-projects-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:900});
+  assert.equal(await page.locator('main').evaluate(e=>e.scrollWidth>e.clientWidth+1),false);
+  await page.screenshot({path:'/private/tmp/rexy-live-projects-mobile.png',fullPage:true});
+  await page.setViewportSize({width:1440,height:1000});
   const navigation=[];
   for(let i=0;i<10;i++) {
     const name=i%2===0?'Profile':'Projects';
@@ -85,14 +114,19 @@ try {
   await context.route(`${api}/v1/**`,route=>route.abort());
   await page.reload();
   await page.locator('.pj-pitem').first().waitFor({timeout:5000});
+  await page.locator('.pj-pitem').filter({has:page.locator('.pj-pname',{hasText:generated.name})}).first().click();
+  await page.getByRole('tab',{name:'SKILL.md',exact:true}).waitFor({timeout:5000});
+  await page.getByRole('tab',{name:'SKILL.md',exact:true}).click();
+  await page.getByRole('button',{name:'Source',exact:true}).click();
+  assert.equal(await page.locator('.pj-source').textContent(),docs.docs.skillMd);
   await page.getByRole('button',{name:'Profile',exact:true}).click();
   await page.locator('.pf-totals').waitFor({timeout:5000});
   await page.setViewportSize({width:390,height:900});
   assert.equal(await page.locator('main').evaluate(e=>e.scrollWidth>e.clientWidth+1),false);
   await page.screenshot({path:'/private/tmp/rexy-live-profile-mobile.png',fullPage:true});
   assert.equal(errors.length,0,errors.join('; '));
-  assert.equal(modelRequests.length,0,'Opening pages must never call Grok');
-  console.log(JSON.stringify({cached_navigation_ms:navigation,offline_refresh:true,ui_api_count_parity:true,exact_saved_skill_display:true,model_calls_on_load:0,page_errors:0}));
+  assert.equal(modelRequests.length,process.env.QA_GENERATE==='1'?1:0,'Only the explicit generation click may call Grok');
+  console.log(JSON.stringify({cached_navigation_ms:navigation,offline_refresh:true,ui_api_count_parity:true,exact_saved_skill_display:true,copy_and_download_exact:true,model_calls_on_load:0,page_errors:0}));
 } finally {
   await browser?.close();
   await auth.auth.signOut({scope:'local'}); // Only the temporary QA session.
