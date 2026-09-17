@@ -85,6 +85,7 @@ def main():
                     titles=validate(data['choices'][0]['message']['content'],[r['id'] for r in batch])
                     tokens+=data.get('usage',{}).get('total_tokens',0)
                     with c.transaction(), c.pipeline():
+                        c.execute('set transaction read write')
                         for title in titles:
                             c.execute("""update public.sessions set display_title=%s,title_origin='model'
                                 where user_id=%s and id=%s and title_origin is distinct from 'model'""",

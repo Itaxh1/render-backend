@@ -34,6 +34,19 @@ def make_app():
     return create_app(settings, MemoryStore(), FakeVerifier())
 
 
+def test_storage_failure_is_retryable_and_does_not_leak_database_errors(monkeypatch):
+    from psycopg.errors import DiskFull
+    async def failed_claim(self, owner):
+        raise DiskFull('private storage path and details')
+    monkeypatch.setattr(MemoryStore,'create_claim',failed_claim)
+    with TestClient(make_app()) as client:
+        response=client.post('/v1/install/claims',headers={'authorization':'Bearer browser-token'})
+        assert response.status_code==503
+        assert response.headers['Retry-After']=='60'
+        assert 'saved history is retained' in response.json()['detail']
+        assert 'private storage' not in response.text
+
+
 def connect_device(client: TestClient) -> tuple[str, str]:
     response = client.post(
         "/v1/install/claims", headers={"authorization": "Bearer browser-token"}

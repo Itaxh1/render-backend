@@ -69,6 +69,14 @@ def create_app(settings: Settings, store: Store, verifier: TokenVerifier | None 
     for error in (PoolTimeout, TooManyRequests, pg_errors.QueryCanceled, pg_errors.LockNotAvailable,
                   pg_errors.DeadlockDetected, pg_errors.SerializationFailure):
         app.add_exception_handler(error, database_busy)
+
+    async def storage_unavailable(_request, _error):
+        return JSONResponse(status_code=503, content={'detail':
+            'Database storage is unavailable. Uploads are paused; saved history is retained.'},
+            headers={'Cache-Control':'no-store','Retry-After':'60'})
+
+    for error in (pg_errors.ReadOnlySqlTransaction, pg_errors.DiskFull):
+        app.add_exception_handler(error, storage_unavailable)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.rexy_web_origin],

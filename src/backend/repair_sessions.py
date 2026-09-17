@@ -196,11 +196,18 @@ def main():
             if len(ids)==1:
                 continue
             with c.transaction():
-                c.execute("set transaction read write; set local lock_timeout='5s'; set local statement_timeout='120s'")
+                c.execute("set transaction read write; set local lock_timeout='5s'; set local statement_timeout='120s'; set local work_mem='64MB'")
                 print(json.dumps(merge_group(c,owner,source,key,sorted(ids))))
         with c.transaction():
             c.execute('set transaction read write')
             print(json.dumps({'titles_updated':backfill_titles(c)}))
+            c.execute('''insert into private.summary_jobs(user_id,session_id,input_revision,available_at)
+                select s.user_id,s.id,s.summary_input_version,now()+interval '60 seconds'
+                from public.sessions s where (s.last_event_at at time zone 'UTC')::date
+                  between (now() at time zone 'UTC')::date-6 and (now() at time zone 'UTC')::date
+                  and not exists(select 1 from public.summaries sm where sm.user_id=s.user_id
+                    and sm.session_id=s.id and sm.input_revision>=s.summary_input_version)
+                on conflict(user_id,session_id) do nothing''')
 
 
 if __name__ == '__main__':
