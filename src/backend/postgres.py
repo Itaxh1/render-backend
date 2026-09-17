@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from .bulk_ingest import write_records
+from .day_queries import RIBBON_EVENTS_SQL
 
 from .models import (
     BrowserDevice,
@@ -445,19 +446,8 @@ class PostgresStore:
             ).fetchall()
             event_rows = await (
                 await connection.execute(
-                    """
-                    select e.id, e.created_at, e.local_day, s.source,
-                           e.session_id, e.type, tc.status, tc.tool_name, tc.duration_ms
-                    from public.events e
-                    join public.sessions s
-                      on s.user_id = e.user_id and s.id = e.session_id
-                    left join public.tool_calls tc
-                      on tc.user_id = e.user_id and tc.event_id = e.id
-                    where e.user_id = %s and e.local_day = %s
-                      and e.type in ('user', 'agent', 'tool')
-                    order by e.created_at, e.id
-                    """,
-                    (user_id, selected_day),
+                    RIBBON_EVENTS_SQL,
+                    (user_id, selected_day, user_id),
                 )
             ).fetchall()
             story_rows = await (
